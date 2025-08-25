@@ -1,0 +1,21 @@
+[project]
+name = "inspect-vagrant-sandbox"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "aiofiles>=24.1.0",
+    "inspect-ai>=0.3.123",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.17.1",
+    "pytest>=8.4.1",
+    "pytest-asyncio>=1.1.0",
+    "ruff>=0.12.10",
+]
+
+[project.entry-points."inspect_ai"]
+"vagrant-sandbox" = "vagrantsandbox.vagrant_sandbox_provider"
