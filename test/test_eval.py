@@ -8,8 +8,12 @@ from inspect_ai.tool import bash
 import sys
 import os
 
+from inspect_ai.util import SandboxEnvironmentSpec
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from vagrantsandbox.vagrant_sandbox_provider import VagrantSandboxEnvironment  # noqa: F401
+from vagrantsandbox.vagrant_sandbox_provider import (
+    VagrantSandboxEnvironmentConfig,
+)  # noqa: F401
 
 
 @task
@@ -28,7 +32,14 @@ def task_for_test() -> Task:
             ),
         ],
         scorer=includes(),
-        sandbox="vagrant",
+        # sandbox="vagrant",
+        sandbox=SandboxEnvironmentSpec(
+            "vagrant",
+            VagrantSandboxEnvironmentConfig(
+                vagrantfile_path=(os.path.dirname(os.path.abspath(__file__)))
+                + "/Vagrantfile.basic"
+            ),
+        ),
     )
 
 
@@ -41,7 +52,9 @@ def test_inspect_eval() -> None:
                 ModelOutput.for_tool_call(
                     model="mockllm/model",
                     tool_name="bash",
-                    tool_arguments={"cmd": "uname -a"},
+                    tool_arguments={"cmd": "'uname -a'"},
+                    # TODO: check if models do the quoting I added
+                    # (was "uname -a" (without extra single quotes) in the Proxmox provider)
                 ),
                 ModelOutput.for_tool_call(
                     model="mockllm/model",

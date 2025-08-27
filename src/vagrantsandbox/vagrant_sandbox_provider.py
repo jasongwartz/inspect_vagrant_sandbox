@@ -1,8 +1,14 @@
 import asyncio
+import functools
+import itertools
 from os import getenv
 from pathlib import Path
 import shutil
-from typing import Any, override
+import subprocess
+from typing import Any, Callable, TypeVar, TypedDict, assert_never, override
+from logging import getLogger
+from vagrant import Vagrant as BaseVagrant
+from pydantic import BaseModel, Field
 
 import aiofiles  # type: ignore
 from inspect_ai.util import (
@@ -14,11 +20,68 @@ from inspect_ai.util import (
     trace_action,
 )
 
-from logging import getLogger
 
-from pydantic import BaseModel, Field
+class ExecCommandReturn(TypedDict):
+    returncode: int
+    stdout: str
+    stderr: str
 
-from vagrantsandbox._async_vagrant import AsyncVagrant
+
+class Vagrant(BaseVagrant):
+    async def _run_vagrant_command_async(self, args) -> ExecCommandReturn:
+        """
+        Run a vagrant command and return everything, not just stdout.
+
+        args: A sequence of arguments to a vagrant command line.
+        e.g. ['up', 'my_vm_name', '--no-provision'] or
+        ['up', None, '--no-provision'] for a non-Multi-VM environment.
+        """
+        # Make subprocess command
+        command = self._make_vagrant_command(args)
+        print("VAGRANTCOMmAND", command)
+        print("VAGRANTC12", *command)
+
+        result = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=self.root,
+            env=self.env,
+        )
+
+        # Wait for process to complete and capture output
+        stdout, stderr = await result.communicate()
+
+        assert result.returncode is not None, (
+            "returncode should be set after communicate()"
+        )
+
+        # Decode bytes to string
+        stdout_str = stdout.decode("utf-8") if stdout else ""
+        stderr_str = stderr.decode("utf-8") if stderr else ""
+
+        return {
+            "stdout": stdout_str,
+            "stderr": stderr_str,
+            "returncode": result.returncode,
+        }
+
+    @override
+    def ssh(self, vm_name=None, command=None, extra_ssh_args=None):
+        """
+        Execute a command via ssh on the vm specified.
+        command: The command to execute via ssh.
+        extra_ssh_args: Corresponds to '--' option in the vagrant ssh command
+        Returns the output of running the command.
+        """
+        cmd = ["ssh", vm_name, "--command", command]
+        if extra_ssh_args is not None:
+            cmd += ["--", extra_ssh_args]
+
+        return self._run_vagrant_command_async(cmd)
+
+
+T = TypeVar("T")
 
 
 class VagrantSandboxEnvironmentConfig(BaseModel, frozen=True):
@@ -45,18 +108,26 @@ class VagrantSandboxEnvironmentConfig(BaseModel, frozen=True):
     #     ...
 
 
+async def _run_in_executor(func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+    """Run a function in the thread pool executor."""
+    # TODO: is it necessary to allow passing a custom executor?
+    return await asyncio.get_event_loop().run_in_executor(
+        None, functools.partial(func, *args, **kwargs)
+    )
+
+
 @sandboxenv(name="vagrant")
 class VagrantSandboxEnvironment(SandboxEnvironment):
     logger = getLogger(__name__)
 
     TRACE_NAME = "vagrant_sandbox_environment"
 
-    vagrant: AsyncVagrant
+    vagrant: Vagrant
 
     def __init__(
         self,
         tmpdir_context: aiofiles.tempfile.AiofilesContextManagerTempDir,
-        vagrant: AsyncVagrant,
+        vagrant: Vagrant,
     ):
         self.vagrant = vagrant
         self.tmpdir_context = tmpdir_context
@@ -91,9 +162,13 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             (Path(tmpdir) / "Vagrantfile").as_posix(),
         )
 
-        vagrant = AsyncVagrant(tmpdir)
+        vagrant = Vagrant(root=tmpdir)
 
-        await vagrant.up()
+        try:
+            await _run_in_executor(vagrant.up)
+        except subprocess.CalledProcessError as e:
+            cls.logger.error(e.stderr)
+            raise e
 
         sandboxes: dict[str, SandboxEnvironment] = {}
         vagrant_sandbox_environment = VagrantSandboxEnvironment(tmpdir_context, vagrant)
@@ -124,7 +199,7 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             for env in environments.values():
                 if isinstance(env, VagrantSandboxEnvironment):
                     # TODO: teardown group if more than one?
-                    await env.vagrant.destroy()
+                    await _run_in_executor(env.vagrant.destroy)
                     await env.tmpdir_context.__aexit__(None, None, None)
         return None
 
@@ -157,8 +232,8 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
     async def cli_cleanup(cls, id: str | None) -> None:
         if id is None:
             config = VagrantSandboxEnvironmentConfig()
-            vagrant = AsyncVagrant()
-            await vagrant.destroy()
+            vagrant = Vagrant()
+            await _run_in_executor(vagrant.destroy)
             # TODO: is this right?
         else:
             print("\n[red]Cleanup by ID not implemented[/red]\n")
@@ -189,29 +264,60 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         #     retry=tenacity.retry_if_result(lambda x: x is False),
         # )
 
+        command = " ".join(
+            itertools.chain.from_iterable(
+                item.split() if isinstance(item, str) else item for item in cmd
+            )
+        )
+
         with trace_action(
             self.logger,
             self.TRACE_NAME,
             # f"exec_command {self.vm_id=} {exec_response_pid=}",
             "exec_command ",
         ):
-            returncode, stdout, stderr = await self.vagrant.ssh_command(" ".join(cmd))
+            result = await self.vagrant.ssh(command=command)
 
             return ExecResult(
-                success=returncode == 0,
-                returncode=returncode,
-                stdout=stdout,
-                stderr=stderr,
+                success=result["returncode"] == 0,
+                returncode=result["returncode"],
+                stdout=result["stdout"],
+                stderr=result["stderr"],
             )
 
     @override
     async def write_file(self, file: str, contents: str | bytes) -> None:
-        await self.vagrant.ssh_command(["echo", contents, ">", file])
+        contents_str: str
+        if isinstance(contents, bytes):
+            contents_str = contents.decode()
+        elif isinstance(contents, str):
+            contents_str = contents
+        else:
+            assert_never(contents)  # type: ignore[arg-type]
+
+        command = " ".join(
+                [
+                    "echo",
+                    contents_str,
+                    ">",
+                    file,
+                ]
+            ),
+        result = await self.vagrant.ssh(
+            command=command
+        )
+        if result["returncode"] != 0:
+            raise subprocess.CalledProcessError(result["returncode"], command, result["stdout"])
+
 
     @override
     async def read_file(self, file: str, text: bool = True) -> str | bytes:  # type: ignore
-        returncode, stdout, stderr = await self.vagrant.ssh_command(f"cat f{file}")
-        return stdout
+        command = f"cat f{file}"
+        result = await self.vagrant.ssh(command=command)
+        if result["returncode"] != 0:
+            raise subprocess.CalledProcessError(result["returncode"], command, result["stdout"])
+
+        return result["stdout"]
         # type-ignore is because Mypy complains that this override doesn't implement bytes return
 
     @override
