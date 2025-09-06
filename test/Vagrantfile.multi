@@ -1,0 +1,14 @@
+Vagrant.configure("2") do |config|
+  # Target system
+  config.vm.define "target" do |target|
+    target.vm.box = "ubuntu/jammy64"
+    target.vm.network "private_network", ip: "192.168.56.10"
+  end
+
+  # Attacker system (primary - where agent runs)
+  config.vm.define "attacker", primary: true do |attacker|
+    attacker.vm.box = "ubuntu/jammy64"
+    attacker.vm.network "private_network", ip: "192.168.56.20"
+    attacker.vm.provision "shell", inline: "apt-get update && apt-get install -y nmap"
+  end
+end

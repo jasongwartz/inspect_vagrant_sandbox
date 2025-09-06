@@ -13,3 +13,5 @@ wheels/
 logs/
 
 **/Vagrantfile
+
+.env*

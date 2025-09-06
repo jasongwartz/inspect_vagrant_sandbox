@@ -28,6 +28,14 @@ class ExecCommandReturn(TypedDict):
 
 
 class Vagrant(BaseVagrant):
+    async def get_vm_names(self) -> list[str]:
+        """Get list of VM names defined in the Vagrantfile."""
+        try:
+            # Use python-vagrant's built-in status method
+            status_info = await _run_in_executor(self.status)
+            return [vm['name'] for vm in status_info]
+        except Exception:
+            return []
     async def _run_vagrant_command_async(self, args) -> ExecCommandReturn:
         """
         Run a vagrant command and return everything, not just stdout.
@@ -88,6 +96,10 @@ class VagrantSandboxEnvironmentConfig(BaseModel, frozen=True):
     vagrantfile_path: str = Field(
         default_factory=lambda: getenv("VAGRANTFILE_PATH", "./Vagrantfile")
     )
+    primary_vm_name: str | None = Field(
+        default=None,
+        description="Name of the VM to use as the 'default' sandbox environment. If None, uses first available VM."
+    )
     # port: int = Field(default_factory=lambda: int(getenv("PROXMOX_PORT", "8006")))
     # user: str = Field(default_factory=lambda: getenv("PROXMOX_USER", "root"))
     # user_realm: str = Field(default_factory=lambda: getenv("PROXMOX_REALM", "pam"))
@@ -128,9 +140,11 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         self,
         tmpdir_context: aiofiles.tempfile.AiofilesContextManagerTempDir,
         vagrant: Vagrant,
+        vm_name: str | None = None,
     ):
         self.vagrant = vagrant
         self.tmpdir_context = tmpdir_context
+        self.vm_name = vm_name
 
     @classmethod
     async def task_init(
@@ -164,15 +178,54 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
 
         vagrant = Vagrant(root=tmpdir)
 
+        # Get available VMs before starting them
         try:
+            vm_names = await vagrant.get_vm_names()
+        except Exception as e:
+            cls.logger.warning(f"Failed to get VM names: {e}. Assuming single-VM Vagrantfile.")
+            vm_names = []
+        
+        # If no VMs found, assume single-VM Vagrantfile
+        if not vm_names:
+            vm_names = [None]  # None means default/single VM
+
+        try:
+            # Start all VMs
             await _run_in_executor(vagrant.up)
         except subprocess.CalledProcessError as e:
             cls.logger.error(e.stderr)
             raise e
 
         sandboxes: dict[str, SandboxEnvironment] = {}
-        vagrant_sandbox_environment = VagrantSandboxEnvironment(tmpdir_context, vagrant)
-        sandboxes["default"] = vagrant_sandbox_environment
+        
+        # Determine which VM should be the default
+        primary_vm = config.primary_vm_name
+        if primary_vm and primary_vm not in vm_names:
+            available_vms = [vm for vm in vm_names if vm is not None]
+            cls.logger.warning(
+                f"Primary VM '{primary_vm}' not found in Vagrantfile. "
+                f"Available VMs: {available_vms}. Using first available VM."
+            )
+            primary_vm = vm_names[0] if vm_names else None
+        elif not primary_vm:
+            primary_vm = vm_names[0] if vm_names else None
+
+        # Create sandbox environments for each VM
+        for vm_name in vm_names:
+            env = VagrantSandboxEnvironment(tmpdir_context, vagrant, vm_name)
+            
+            # The primary VM becomes "default"
+            if vm_name == primary_vm:
+                sandboxes["default"] = env
+            
+            # Also add by VM name if it's not None (multi-VM case)
+            if vm_name is not None:
+                sandboxes[vm_name] = env
+
+        # Ensure we always have a "default" sandbox
+        if "default" not in sandboxes and sandboxes:
+            first_key = next(iter(sandboxes))
+            sandboxes["default"] = sandboxes[first_key]
 
         # borrowed from k8s provider
         def reorder_default_first(
@@ -276,7 +329,7 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             # f"exec_command {self.vm_id=} {exec_response_pid=}",
             "exec_command ",
         ):
-            result = await self.vagrant.ssh(command=command)
+            result = await self.vagrant.ssh(vm_name=self.vm_name, command=command)
 
             return ExecResult(
                 success=result["returncode"] == 0,
@@ -304,6 +357,7 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                 ]
             ),
         result = await self.vagrant.ssh(
+            vm_name=self.vm_name,
             command=command
         )
         if result["returncode"] != 0:
@@ -313,7 +367,7 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
     @override
     async def read_file(self, file: str, text: bool = True) -> str | bytes:  # type: ignore
         command = f"cat f{file}"
-        result = await self.vagrant.ssh(command=command)
+        result = await self.vagrant.ssh(vm_name=self.vm_name, command=command)
         if result["returncode"] != 0:
             raise subprocess.CalledProcessError(result["returncode"], command, result["stdout"])
 
