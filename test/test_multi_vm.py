@@ -7,6 +7,7 @@ from inspect_ai.tool import bash
 
 import sys
 import os
+import pytest
 
 from inspect_ai.util import SandboxEnvironmentSpec
 
@@ -16,7 +17,7 @@ from vagrantsandbox.vagrant_sandbox_provider import (
 )
 
 @task
-def test_multi_vm_task() -> Task:
+def multi_vm_task() -> Task:
     return Task(
         dataset=[
             Sample(
@@ -36,15 +37,18 @@ def test_multi_vm_task() -> Task:
             VagrantSandboxEnvironmentConfig(
                 vagrantfile_path=(os.path.dirname(os.path.abspath(__file__)))
                 + "/Vagrantfile.multi",
+                # Note: primary_vm_name will be "attacker" + unique suffix at runtime
                 primary_vm_name="attacker"
             ),
         ),
     )
 
+@pytest.mark.vm_required
+@pytest.mark.inspect_eval
 def test_multi_vm_config():
     """Test that multi-VM configuration works correctly."""
     eval_logs = eval(
-        tasks=[test_multi_vm_task()],
+        tasks=[multi_vm_task()],
         model=get_model(
             "mockllm/model",
             custom_outputs=[

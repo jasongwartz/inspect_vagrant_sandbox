@@ -7,6 +7,7 @@ from inspect_ai.tool import bash
 
 import sys
 import os
+import pytest
 
 from inspect_ai.util import SandboxEnvironmentSpec
 
@@ -43,6 +44,8 @@ def task_for_test() -> Task:
     )
 
 
+@pytest.mark.vm_required
+@pytest.mark.inspect_eval
 def test_inspect_eval() -> None:
     eval_logs = eval(
         tasks=[task_for_test()],
@@ -72,7 +75,6 @@ def test_inspect_eval() -> None:
     assert eval_logs[0].samples
     sample = eval_logs[0].samples[0]
     tool_calls = [x for x in sample.messages if x.role == "tool"]
-    print(tool_calls)
     assert "ubuntu" in tool_calls[0].text
 
 

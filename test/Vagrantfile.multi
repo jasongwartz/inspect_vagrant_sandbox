@@ -1,14 +1,36 @@
 Vagrant.configure("2") do |config|
+  # Shared configuration from working Vagrantfile.basic
+  config.ssh.insert_key = false
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+
+  # Get unique suffix from environment variable to avoid VM name conflicts
+  vm_suffix = ENV['INSPECT_VM_SUFFIX'] || ''
+
   # Target system
-  config.vm.define "target" do |target|
-    target.vm.box = "ubuntu/jammy64"
-    target.vm.network "private_network", ip: "192.168.56.10"
+  config.vm.define "target#{vm_suffix}" do |target|
+    target.vm.box = "perk/ubuntu-2204-arm64"
+    target.vm.provider "qemu" do |qe|
+      qe.machine = "virt,accel=hvf,highmem=off"
+      qe.cpu = "host"
+      qe.memory = "1024"
+      qe.cpus = 1
+      qe.net_device = "virtio-net"
+      qe.ssh_auto_correct = true
+    end
   end
 
   # Attacker system (primary - where agent runs)
-  config.vm.define "attacker", primary: true do |attacker|
-    attacker.vm.box = "ubuntu/jammy64"
-    attacker.vm.network "private_network", ip: "192.168.56.20"
-    attacker.vm.provision "shell", inline: "apt-get update && apt-get install -y nmap"
+  config.vm.define "attacker#{vm_suffix}", primary: true do |attacker|
+    attacker.vm.box = "perk/ubuntu-2204-arm64"
+    attacker.vm.provider "qemu" do |qe|
+      qe.machine = "virt,accel=hvf,highmem=off"
+      qe.cpu = "host"
+      qe.memory = "1024"
+      qe.cpus = 1
+      qe.net_device = "virtio-net"
+      qe.ssh_auto_correct = true
+    end
+    # Disable provisioning for now to isolate VM startup issues
+    # attacker.vm.provision "shell", inline: "apt-get update && apt-get install -y nmap"
   end
 end
