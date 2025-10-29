@@ -30,7 +30,7 @@ class ExecCommandReturn(TypedDict):
 
 class Vagrant(BaseVagrant):
     logger = getLogger(__name__)
-    
+
     async def get_vm_names(self) -> list[str]:
         """Get list of VM names defined in the Vagrantfile."""
         try:
@@ -56,7 +56,9 @@ class Vagrant(BaseVagrant):
         command = self._make_vagrant_command(args)
         self.logger.debug(f"Vagrant command: {command}")
         self.logger.debug(f"Working directory: {self.root}")
-        self.logger.debug(f"Environment variables: {dict(self.env) if self.env else 'None'}")
+        self.logger.debug(
+            f"Environment variables: {dict(self.env) if self.env else 'None'}"
+        )
 
         result = await asyncio.create_subprocess_exec(
             *command,
@@ -91,7 +93,7 @@ class Vagrant(BaseVagrant):
         extra_ssh_args: Corresponds to '--' option in the vagrant ssh command
         Returns the output of running the command.
         """
-        cmd = ["ssh", vm_name, "--command", command]
+        cmd = ["ssh", vm_name, "--no-tty", "--command", command]
         if extra_ssh_args is not None:
             cmd += ["--", extra_ssh_args]
 
@@ -109,24 +111,6 @@ class VagrantSandboxEnvironmentConfig(BaseModel, frozen=True):
         default=None,
         description="Name of the VM to use as the 'default' sandbox environment. If None, uses first available VM.",
     )
-    # port: int = Field(default_factory=lambda: int(getenv("PROXMOX_PORT", "8006")))
-    # user: str = Field(default_factory=lambda: getenv("PROXMOX_USER", "root"))
-    # user_realm: str = Field(default_factory=lambda: getenv("PROXMOX_REALM", "pam"))
-    # password: str = Field(
-    #     default_factory=lambda: getenv("PROXMOX_PASSWORD", "password")
-    # )
-    # node: str = Field(default_factory=lambda: getenv("PROXMOX_NODE", "proxmox"))
-    # verify_tls: bool = Field(
-    #     default_factory=lambda: getenv("PROXMOX_VERIFY_TLS", "1") == "1"
-    # )
-
-    # @classmethod
-    # def config_files(cls) -> list[str]:
-    #     ...
-
-    # @classmethod
-    # def default_concurrency(cls) -> int | None:
-    #     ...
 
 
 async def _run_in_executor(func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
@@ -243,11 +227,27 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                     f"Could not get initial status (this is normal for new VMs): {status_error}"
                 )
 
-            await _run_in_executor(vagrant.up)
+            # Use our async method to capture stdout/stderr on failure
+            up_result = await vagrant._run_vagrant_command_async(["up"])
             cls.logger.info("All VMs started successfully")
+            if up_result["stdout"]:
+                cls.logger.debug(f"Vagrant up stdout: {up_result['stdout']}")
+            if up_result["stderr"]:
+                cls.logger.debug(f"Vagrant up stderr: {up_result['stderr']}")
+
+            # Check if command actually succeeded
+            if up_result["returncode"] != 0:
+                error = subprocess.CalledProcessError(
+                    up_result["returncode"], ["vagrant", "up"]
+                )
+                error.stdout = up_result["stdout"]
+                error.stderr = up_result["stderr"]
+                raise error
         except subprocess.CalledProcessError as e:
             cls.logger.error(f"Failed to start VMs. Return code: {e.returncode}")
             cls.logger.error(f"Command that failed: {e.cmd}")
+
+            # Display captured output
             if hasattr(e, "stdout") and e.stdout:
                 cls.logger.error(f"Vagrant stdout: {e.stdout}")
             if hasattr(e, "stderr") and e.stderr:
@@ -367,8 +367,7 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             # Figure out how to clean up instances
         else:
             cls.logger.info(
-                "Cleanup all sandbox releases with: "
-                "inspect sandbox cleanup vagrant"
+                "Cleanup all sandbox releases with: inspect sandbox cleanup vagrant"
             )
 
     @classmethod
@@ -398,16 +397,6 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         timeout: int | None = None,
         timeout_retry: bool = True,
     ) -> ExecResult[str]:
-        # tmp_start = f"/tmp/{__name__}{time.time_ns()}_"
-
-        # @tenacity.retry(
-        #     wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
-        #     stop=tenacity.stop_after_delay(timeout)
-        #     if timeout is not None
-        #     else tenacity.stop_never,
-        #     retry=tenacity.retry_if_result(lambda x: x is False),
-        # )
-
         command = " ".join(
             itertools.chain.from_iterable(
                 item.split() if isinstance(item, str) else item for item in cmd
@@ -479,4 +468,8 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
            NotImplementedError: For sandboxes that don't provide connections
            ConnectionError: If sandbox is not currently running.
         """
-        return SandboxConnection(type="vagrant", command="vagrant ssh")
+        tmpdir = self.tmpdir_context.__str__()
+        return SandboxConnection(
+            type="vagrant",
+            command=f"VAGRANT_CWD={tmpdir} vagrant ssh",
+        )
