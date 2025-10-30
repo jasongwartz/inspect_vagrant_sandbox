@@ -16,6 +16,7 @@ from vagrantsandbox.vagrant_sandbox_provider import (
     VagrantSandboxEnvironmentConfig,
 )
 
+
 @task
 def multi_vm_task() -> Task:
     return Task(
@@ -38,10 +39,11 @@ def multi_vm_task() -> Task:
                 vagrantfile_path=(os.path.dirname(os.path.abspath(__file__)))
                 + "/Vagrantfile.multi",
                 # Note: primary_vm_name will be "attacker" + unique suffix at runtime
-                primary_vm_name="attacker"
+                primary_vm_name="attacker",
             ),
         ),
     )
+
 
 @pytest.mark.vm_required
 @pytest.mark.inspect_eval
@@ -58,7 +60,7 @@ def test_multi_vm_config():
                     tool_arguments={"cmd": "hostname"},
                 ),
                 ModelOutput.for_tool_call(
-                    model="mockllm/model", 
+                    model="mockllm/model",
                     tool_name="submit",
                     tool_arguments={"answer": "attacker"},
                 ),
@@ -70,6 +72,7 @@ def test_multi_vm_config():
     assert len(eval_logs) == 1
     assert eval_logs[0]
     assert eval_logs[0].error is None
+
 
 if __name__ == "__main__":
     test_multi_vm_config()

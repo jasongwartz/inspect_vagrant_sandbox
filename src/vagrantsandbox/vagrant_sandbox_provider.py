@@ -30,7 +30,7 @@ class ExecCommandReturn(TypedDict):
 class Vagrant(BaseVagrant):
     logger = getLogger(__name__)
 
-    async def get_vm_names(self) -> list[str]:
+    async def get_vm_names(self) -> list[str | None]:
         """Get list of VM names defined in the Vagrantfile."""
         try:
             # Use python-vagrant's built-in status method
@@ -181,10 +181,10 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         # Set environment variable for Vagrantfile to use
         import os
 
-        env = os.environ.copy()
-        env["INSPECT_VM_SUFFIX"] = unique_suffix
+        vagrant_env = os.environ.copy()
+        vagrant_env["INSPECT_VM_SUFFIX"] = unique_suffix
 
-        vagrant = Vagrant(root=tmpdir, env=env)
+        vagrant = Vagrant(root=tmpdir, env=vagrant_env)
 
         # Get available VMs before starting them
         try:
@@ -206,7 +206,7 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             cls.logger.info(f"Starting VMs: {vm_names}")
             cls.logger.info(f"Vagrant working directory: {tmpdir}")
             cls.logger.info(
-                f"Environment variables: INSPECT_VM_SUFFIX={env.get('INSPECT_VM_SUFFIX')}"
+                f"Environment variables: INSPECT_VM_SUFFIX={vagrant_env.get('INSPECT_VM_SUFFIX')}"
             )
 
             # Log the Vagrantfile content for debugging
@@ -374,7 +374,7 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
     @override
     async def cli_cleanup(cls, id: str | None) -> None:
         if id is None:
-            config = VagrantSandboxEnvironmentConfig()
+            config = VagrantSandboxEnvironmentConfig()  # noqa: F841
             vagrant = Vagrant()
             await _run_in_executor(vagrant.destroy)
             # TODO: is this right?
