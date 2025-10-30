@@ -22,3 +22,10 @@ dev = [
 
 [project.entry-points."inspect_ai"]
 "vagrant-sandbox" = "vagrantsandbox.vagrant_sandbox_provider"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
