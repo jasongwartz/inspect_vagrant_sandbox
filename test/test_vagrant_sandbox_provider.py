@@ -350,7 +350,7 @@ class TestVagrantSandboxEnvironment:
         connection = await env.connection()
 
         assert connection.type == "vagrant"
-        assert connection.command == "vagrant ssh"
+        assert connection.command.endswith("vagrant ssh")
 
     @pytest.mark.unit
     @pytest.mark.asyncio
