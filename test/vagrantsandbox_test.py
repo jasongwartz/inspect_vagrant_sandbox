@@ -1,5 +1,5 @@
 import pytest
-from ..src.vagrantsandbox.vagrant_sandbox_provider import (
+from vagrantsandbox.vagrant_sandbox_provider import (
     VagrantSandboxEnvironment,
     VagrantSandboxEnvironmentConfig,
     _run_in_executor,
