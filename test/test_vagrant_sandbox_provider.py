@@ -76,6 +76,16 @@ def mock_aiofiles_patches():
         }
 
 
+@pytest.fixture(autouse=True)
+def mock_vagrant_for_unit_tests(request):
+    """Auto-mock vagrant executable for unit tests."""
+    if "unit" in [mark.name for mark in request.node.iter_markers()]:
+        with patch("vagrant.get_vagrant_executable", return_value="/usr/bin/vagrant"):
+            yield
+    else:
+        yield
+
+
 class MockAsyncProcess:
     """Helper class to mock async subprocess."""
 
