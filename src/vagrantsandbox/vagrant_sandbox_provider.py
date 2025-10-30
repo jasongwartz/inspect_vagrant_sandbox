@@ -374,7 +374,7 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
     @override
     async def cli_cleanup(cls, id: str | None) -> None:
         if id is None:
-            config = VagrantSandboxEnvironmentConfig()
+            config = VagrantSandboxEnvironmentConfig()  # noqa: F841
             vagrant = Vagrant()
             await _run_in_executor(vagrant.destroy)
             # TODO: is this right?

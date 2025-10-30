@@ -7,8 +7,6 @@ Test Categories:
 - inspect_eval: Tests that use the Inspect AI evaluation framework
 """
 
-import pytest
-
 
 def pytest_configure(config):
     """Register custom markers for test categorization."""
