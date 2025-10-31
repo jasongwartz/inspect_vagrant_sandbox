@@ -157,7 +157,7 @@ async def test_eval_read_system_file():
                 ]
             },
         ),
-        timeout=60.0,
+        timeout=180.0,
     )
 
     assert result[0].status == "success", "Eval should complete successfully"

@@ -100,6 +100,52 @@ def vagrant_example() -> Task:
     )
 ```
 
+## Developing the Sandbox Provider
+
+First, make sure to familiarise yourself with the [Inspect sandbox provider extension API](https://inspect.aisi.org.uk/extensions.html#sec-sandbox-environment-extensions).
+
+This implementation takes much inspiration from the [Inspect Kubernetes sandbox provider](https://k8s-sandbox.aisi.org.uk/) and the [Inspect Proxmox sandbox provider](https://github.com/UKGovernmentBEIS/inspect_proxmox_sandbox), so they are also useful reference points.
+
+### Running Tests
+
+This project uses pytest with custom markers to categorize tests:
+
+- `unit` - Fast unit tests with no external dependencies
+- `vm_required` - Tests that require spinning up actual VMs (slow, requires Vagrant/QEMU)
+- `inspect_eval` - Tests that use the Inspect AI evaluation framework
+
+A test case could have both of `vm_required` and `inspect_eval`, neither (unit tests), or only one of the two.
+
+#### Run specific test categories:
+
+```bash
+# Run only fast unit tests
+uv run pytest -m unit
+
+# Run only VM infrastructure tests
+uv run pytest -m vm_required
+
+# Run only Inspect AI evaluation tests
+uv run pytest -m inspect_eval
+
+# Run all tests
+uv run pytest
+```
+
+#### Parallel execution:
+
+Tests support parallel execution using pytest-xdist, which significantly speeds up VM tests:
+
+```bash
+# Run tests in parallel with auto-detected worker count
+uv run pytest -n auto
+
+# Run with specific number of workers
+uv run pytest -n 4
+```
+
+**Note:** Parallel execution is especially useful for VM tests - each test uses a separate VM, and multiple VM-based tests can run simultaneously.
+
 ## Future Work
 
 This release should be considered **pre-alpha**! There are several bug fixes and missing features that would be required before a production release. In particular, users should take note of the following:

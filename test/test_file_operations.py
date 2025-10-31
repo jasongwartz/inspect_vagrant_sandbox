@@ -46,7 +46,7 @@ async def test_cat_basic_file():
     try:
         await sandbox.write_file("/tmp/test.txt", "hello world")
         result = await asyncio.wait_for(
-            sandbox.exec(["cat", "/tmp/test.txt"]), timeout=10.0
+            sandbox.exec(["cat", "/tmp/test.txt"]), timeout=20.0
         )
         assert result.stdout == "hello world"
         assert result.success
@@ -82,7 +82,7 @@ async def test_cat_system_files():
 
         for filepath in system_files:
             result = await asyncio.wait_for(
-                sandbox.exec(["cat", filepath]), timeout=10.0
+                sandbox.exec(["cat", filepath]), timeout=20.0
             )
             assert result.success, f"Failed to read {filepath}"
             assert len(result.stdout) > 0, f"Empty output from {filepath}"
@@ -113,7 +113,7 @@ async def test_sequential_file_reads():
         # Read the same file multiple times
         for i in range(10):
             result = await asyncio.wait_for(
-                sandbox.exec(["cat", "/tmp/test.txt"]), timeout=5.0
+                sandbox.exec(["cat", "/tmp/test.txt"]), timeout=20.0
             )
             assert result.stdout == "content\n"
             assert result.success
@@ -157,7 +157,7 @@ async def test_cat_various_file_sizes():
             await sandbox.write_file(filepath, content)
 
             result = await asyncio.wait_for(
-                sandbox.exec(["cat", filepath]), timeout=10.0
+                sandbox.exec(["cat", filepath]), timeout=30.0
             )
             assert len(result.stdout) == size, f"Wrong size for {label}"
             assert result.success
@@ -203,7 +203,7 @@ async def test_cat_special_characters():
             await sandbox.write_file(filepath, content)
 
             result = await asyncio.wait_for(
-                sandbox.exec(["cat", filepath]), timeout=5.0
+                sandbox.exec(["cat", filepath]), timeout=20.0
             )
             assert result.stdout == content, f"Content mismatch for {label}"
             assert result.success
@@ -246,7 +246,7 @@ async def test_compare_file_reading_commands():
         ]
 
         for cmd, name in commands:
-            result = await asyncio.wait_for(sandbox.exec(cmd), timeout=5.0)
+            result = await asyncio.wait_for(sandbox.exec(cmd), timeout=20.0)
             assert result.success, f"{name} failed"
             assert len(result.stdout) > 0, f"{name} returned empty output"
 
@@ -275,7 +275,7 @@ async def test_cat_multiple_files():
         await sandbox.write_file("/tmp/file2.txt", "content 2\n")
 
         result = await asyncio.wait_for(
-            sandbox.exec(["cat", "/tmp/file1.txt", "/tmp/file2.txt"]), timeout=5.0
+            sandbox.exec(["cat", "/tmp/file1.txt", "/tmp/file2.txt"]), timeout=20.0
         )
         assert "content 1" in result.stdout
         assert "content 2" in result.stdout
@@ -317,7 +317,7 @@ async def test_typical_command_workflow():
         ]
 
         for cmd, description in workflow:
-            result = await asyncio.wait_for(sandbox.exec(cmd), timeout=10.0)
+            result = await asyncio.wait_for(sandbox.exec(cmd), timeout=20.0)
             assert result.success, f"Failed: {description}"
 
     finally:
@@ -346,7 +346,7 @@ async def test_write_then_read_pattern():
             await sandbox.write_file("/tmp/test.txt", content)
 
             result = await asyncio.wait_for(
-                sandbox.exec(["cat", "/tmp/test.txt"]), timeout=5.0
+                sandbox.exec(["cat", "/tmp/test.txt"]), timeout=20.0
             )
             assert result.stdout == content
             assert result.success
@@ -386,7 +386,7 @@ async def test_mixed_command_sequence():
         ]
 
         for cmd, description in workflow:
-            result = await asyncio.wait_for(sandbox.exec(cmd), timeout=5.0)
+            result = await asyncio.wait_for(sandbox.exec(cmd), timeout=20.0)
             assert result.success, f"Failed at: {description}"
 
     finally:
