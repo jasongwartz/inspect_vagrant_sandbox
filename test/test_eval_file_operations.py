@@ -22,7 +22,7 @@ from inspect_ai.solver import generate
 from inspect_ai.util import SandboxEnvironmentSpec
 
 # Import after adding to path if needed
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from vagrantsandbox.vagrant_sandbox_provider import (
     VagrantSandboxEnvironmentConfig,
@@ -31,15 +31,13 @@ from vagrantsandbox.vagrant_sandbox_provider import (
 
 def get_basic_vagrantfile():
     """Get path to Vagrantfile.basic."""
-    return os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "Vagrantfile.basic"
-    )
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "Vagrantfile.basic")
 
 
 # ==============================================================================
 # INSPECT TASK DEFINITIONS
 # ==============================================================================
+
 
 @task
 def read_os_release():
@@ -59,9 +57,7 @@ def read_os_release():
         scorer=includes(),
         sandbox=SandboxEnvironmentSpec(
             "vagrant",
-            VagrantSandboxEnvironmentConfig(
-                vagrantfile_path=get_basic_vagrantfile()
-            ),
+            VagrantSandboxEnvironmentConfig(vagrantfile_path=get_basic_vagrantfile()),
         ),
         max_messages=5,
     )
@@ -88,9 +84,7 @@ def read_multiple_system_files():
         scorer=includes(),
         sandbox=SandboxEnvironmentSpec(
             "vagrant",
-            VagrantSandboxEnvironmentConfig(
-                vagrantfile_path=get_basic_vagrantfile()
-            ),
+            VagrantSandboxEnvironmentConfig(vagrantfile_path=get_basic_vagrantfile()),
         ),
         max_messages=15,
     )
@@ -115,9 +109,7 @@ def system_exploration_workflow():
         scorer=includes(),
         sandbox=SandboxEnvironmentSpec(
             "vagrant",
-            VagrantSandboxEnvironmentConfig(
-                vagrantfile_path=get_basic_vagrantfile()
-            ),
+            VagrantSandboxEnvironmentConfig(vagrantfile_path=get_basic_vagrantfile()),
         ),
         max_messages=20,
     )
@@ -126,6 +118,7 @@ def system_exploration_workflow():
 # ==============================================================================
 # PYTEST TESTS WITH MOCKLLM
 # ==============================================================================
+
 
 @pytest.mark.vm_required
 @pytest.mark.asyncio
@@ -185,17 +178,47 @@ async def test_eval_multiple_file_reads():
             model_args={
                 "choices": [
                     # Read /etc/os-release
-                    [ChatMessageAssistant(content="Checking OS...", tool_calls=[
-                        {"id": "c1", "function": "bash", "arguments": {"cmd": "cat /etc/os-release"}, "type": "function"}
-                    ])],
+                    [
+                        ChatMessageAssistant(
+                            content="Checking OS...",
+                            tool_calls=[
+                                {
+                                    "id": "c1",
+                                    "function": "bash",
+                                    "arguments": {"cmd": "cat /etc/os-release"},
+                                    "type": "function",
+                                }
+                            ],
+                        )
+                    ],
                     # Read /etc/hostname
-                    [ChatMessageAssistant(content="Checking hostname...", tool_calls=[
-                        {"id": "c2", "function": "bash", "arguments": {"cmd": "cat /etc/hostname"}, "type": "function"}
-                    ])],
+                    [
+                        ChatMessageAssistant(
+                            content="Checking hostname...",
+                            tool_calls=[
+                                {
+                                    "id": "c2",
+                                    "function": "bash",
+                                    "arguments": {"cmd": "cat /etc/hostname"},
+                                    "type": "function",
+                                }
+                            ],
+                        )
+                    ],
                     # Read /proc/cpuinfo
-                    [ChatMessageAssistant(content="Checking CPU...", tool_calls=[
-                        {"id": "c3", "function": "bash", "arguments": {"cmd": "cat /proc/cpuinfo"}, "type": "function"}
-                    ])],
+                    [
+                        ChatMessageAssistant(
+                            content="Checking CPU...",
+                            tool_calls=[
+                                {
+                                    "id": "c3",
+                                    "function": "bash",
+                                    "arguments": {"cmd": "cat /proc/cpuinfo"},
+                                    "type": "function",
+                                }
+                            ],
+                        )
+                    ],
                     # Final answer
                     [ChatMessageAssistant(content="Ubuntu 22.04 system.")],
                 ]
@@ -221,21 +244,71 @@ async def test_eval_mixed_command_workflow():
             model=model_name,
             model_args={
                 "choices": [
-                    [ChatMessageAssistant(content="Checking location...", tool_calls=[
-                        {"id": "c1", "function": "bash", "arguments": {"cmd": "pwd"}, "type": "function"}
-                    ])],
-                    [ChatMessageAssistant(content="Checking user...", tool_calls=[
-                        {"id": "c2", "function": "bash", "arguments": {"cmd": "whoami"}, "type": "function"}
-                    ])],
-                    [ChatMessageAssistant(content="Checking OS...", tool_calls=[
-                        {"id": "c3", "function": "bash", "arguments": {"cmd": "cat /etc/os-release"}, "type": "function"}
-                    ])],
-                    [ChatMessageAssistant(content="Checking kernel...", tool_calls=[
-                        {"id": "c4", "function": "bash", "arguments": {"cmd": "uname -a"}, "type": "function"}
-                    ])],
-                    [ChatMessageAssistant(content="Checking hostname...", tool_calls=[
-                        {"id": "c5", "function": "bash", "arguments": {"cmd": "cat /etc/hostname"}, "type": "function"}
-                    ])],
+                    [
+                        ChatMessageAssistant(
+                            content="Checking location...",
+                            tool_calls=[
+                                {
+                                    "id": "c1",
+                                    "function": "bash",
+                                    "arguments": {"cmd": "pwd"},
+                                    "type": "function",
+                                }
+                            ],
+                        )
+                    ],
+                    [
+                        ChatMessageAssistant(
+                            content="Checking user...",
+                            tool_calls=[
+                                {
+                                    "id": "c2",
+                                    "function": "bash",
+                                    "arguments": {"cmd": "whoami"},
+                                    "type": "function",
+                                }
+                            ],
+                        )
+                    ],
+                    [
+                        ChatMessageAssistant(
+                            content="Checking OS...",
+                            tool_calls=[
+                                {
+                                    "id": "c3",
+                                    "function": "bash",
+                                    "arguments": {"cmd": "cat /etc/os-release"},
+                                    "type": "function",
+                                }
+                            ],
+                        )
+                    ],
+                    [
+                        ChatMessageAssistant(
+                            content="Checking kernel...",
+                            tool_calls=[
+                                {
+                                    "id": "c4",
+                                    "function": "bash",
+                                    "arguments": {"cmd": "uname -a"},
+                                    "type": "function",
+                                }
+                            ],
+                        )
+                    ],
+                    [
+                        ChatMessageAssistant(
+                            content="Checking hostname...",
+                            tool_calls=[
+                                {
+                                    "id": "c5",
+                                    "function": "bash",
+                                    "arguments": {"cmd": "cat /etc/hostname"},
+                                    "type": "function",
+                                }
+                            ],
+                        )
+                    ],
                     [ChatMessageAssistant(content="Ubuntu system, vagrant user.")],
                 ]
             },
@@ -255,7 +328,13 @@ if __name__ == "__main__":
     print("\n# As pytest:")
     print("  pytest test/test_eval_file_operations.py -v -s -m vm_required")
     print("\n# As standalone evals:")
-    print("  inspect eval test/test_eval_file_operations.py::read_os_release --model mockllm/model")
-    print("  inspect eval test/test_eval_file_operations.py::read_multiple_system_files --model mockllm/model")
+    print(
+        "  inspect eval test/test_eval_file_operations.py::read_os_release --model mockllm/model"
+    )
+    print(
+        "  inspect eval test/test_eval_file_operations.py::read_multiple_system_files --model mockllm/model"
+    )
     print("\n# With real model:")
-    print("  inspect eval test/test_eval_file_operations.py::read_os_release --model openai/gpt-4")
+    print(
+        "  inspect eval test/test_eval_file_operations.py::read_os_release --model openai/gpt-4"
+    )
