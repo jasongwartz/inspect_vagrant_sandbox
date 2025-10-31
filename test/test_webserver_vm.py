@@ -58,7 +58,9 @@ def test_webserver_vm_config():
                 ModelOutput.for_tool_call(
                     model="mockllm/model",
                     tool_name="bash",
-                    tool_arguments={"cmd": "ip route | grep default | awk '{print $3}'"},
+                    tool_arguments={
+                        "cmd": "ip route | grep default | awk '{print $3}'"
+                    },
                 ),
                 # Try to find the victim VM on the network
                 ModelOutput.for_tool_call(
