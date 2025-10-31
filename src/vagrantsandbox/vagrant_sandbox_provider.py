@@ -1,6 +1,5 @@
 import asyncio
 import functools
-import itertools
 from os import getenv
 from pathlib import Path
 import shlex
@@ -62,6 +61,7 @@ class Vagrant(BaseVagrant):
 
         result = await asyncio.create_subprocess_exec(
             *command,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=self.root,
@@ -397,12 +397,7 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         timeout: int | None = None,
         timeout_retry: bool = True,
     ) -> ExecResult[str]:
-        command = " ".join(
-            itertools.chain.from_iterable(
-                item.split() if isinstance(item, str) else item for item in cmd
-            )
-        )
-
+        command = " ".join(cmd)
         with trace_action(
             self.logger,
             self.TRACE_NAME,
