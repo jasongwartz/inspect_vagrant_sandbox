@@ -43,13 +43,16 @@ class Vagrant(BaseVagrant):
             self.logger.debug(f"get_vm_names failed: {e}")
             return []
 
-    async def _run_vagrant_command_async(self, args) -> ExecCommandReturn:
+    async def _run_vagrant_command_async(
+        self, args, input: str | bytes | None = None
+    ) -> ExecCommandReturn:
         """
         Run a vagrant command and return everything, not just stdout.
 
         args: A sequence of arguments to a vagrant command line.
         e.g. ['up', 'my_vm_name', '--no-provision'] or
         ['up', None, '--no-provision'] for a non-Multi-VM environment.
+        input: Optional input to pass to stdin.
         """
         # Make subprocess command
         command = self._make_vagrant_command(args)
@@ -58,18 +61,24 @@ class Vagrant(BaseVagrant):
         self.logger.debug(
             f"Environment variables: {dict(self.env) if self.env else 'None'}"
         )
+        self.logger.debug(f"Input provided: {input is not None}")
+
+        stdin_mode = (
+            asyncio.subprocess.PIPE if input is not None else asyncio.subprocess.DEVNULL
+        )
 
         result = await asyncio.create_subprocess_exec(
             *command,
-            stdin=asyncio.subprocess.DEVNULL,
+            stdin=stdin_mode,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=self.root,
             env=self.env,
         )
 
-        # Wait for process to complete and capture output
-        stdout, stderr = await result.communicate()
+        stdout, stderr = await result.communicate(
+            input=input.encode("utf-8") if isinstance(input, str) else input
+        )
 
         assert result.returncode is not None, (
             "returncode should be set after communicate()"
@@ -86,18 +95,25 @@ class Vagrant(BaseVagrant):
         }
 
     @override
-    def ssh(self, vm_name=None, command=None, extra_ssh_args=None):
+    def ssh(
+        self,
+        vm_name: str | None = None,
+        command: str | None = None,
+        extra_ssh_args: str | None = None,
+        input: str | bytes | None = None,
+    ):
         """
         Execute a command via ssh on the vm specified.
         command: The command to execute via ssh.
         extra_ssh_args: Corresponds to '--' option in the vagrant ssh command
+        input: Optional input to pass to stdin of the command.
         Returns the output of running the command.
         """
         cmd = ["ssh", vm_name, "--no-tty", "--command", command]
         if extra_ssh_args is not None:
             cmd += ["--", extra_ssh_args]
 
-        return self._run_vagrant_command_async(cmd)
+        return self._run_vagrant_command_async(cmd, input=input)
 
 
 T = TypeVar("T")
@@ -404,7 +420,9 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             # f"exec_command {self.vm_id=} {exec_response_pid=}",
             "exec_command ",
         ):
-            result = await self.vagrant.ssh(vm_name=self.vm_name, command=command)
+            result = await self.vagrant.ssh(
+                vm_name=self.vm_name, command=command, input=input
+            )
 
             return ExecResult(
                 success=result["returncode"] == 0,
