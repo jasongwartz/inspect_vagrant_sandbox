@@ -12,11 +12,28 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "anthropic>=0.66.0",
     "mypy>=1.17.1",
+    "openai>=1.106.1",
     "pytest>=8.4.1",
     "pytest-asyncio>=1.1.0",
+    "pytest-xdist>=3.8.0",
     "ruff>=0.12.10",
 ]
 
 [project.entry-points."inspect_ai"]
 "vagrant-sandbox" = "vagrantsandbox.vagrant_sandbox_provider"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.mypy]
+mypy_path = "src"
+files = ["src"]
+exclude = [
+    "^__init__\\.py$",
+]

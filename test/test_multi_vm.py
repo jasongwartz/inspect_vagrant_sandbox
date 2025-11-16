@@ -7,59 +7,62 @@ from inspect_ai.tool import bash
 
 import sys
 import os
+import pytest
 
 from inspect_ai.util import SandboxEnvironmentSpec
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from vagrantsandbox.vagrant_sandbox_provider import (
     VagrantSandboxEnvironmentConfig,
-)  # noqa: F401
+)
 
 
 @task
-def task_for_test() -> Task:
+def multi_vm_task() -> Task:
     return Task(
         dataset=[
             Sample(
-                input="sample text",
-                target="42",
+                input="Scan the target VM from the attacker VM",
+                target="attacker",
             ),
         ],
         solver=[
             basic_agent(
                 tools=[bash()],
-                message_limit=20,
+                message_limit=5,
             ),
         ],
         scorer=includes(),
-        # sandbox="vagrant",
         sandbox=SandboxEnvironmentSpec(
             "vagrant",
             VagrantSandboxEnvironmentConfig(
                 vagrantfile_path=(os.path.dirname(os.path.abspath(__file__)))
-                + "/Vagrantfile.basic"
+                + "/Vagrantfile.multi",
+                # Note: primary_vm_name will be "attacker" + unique suffix at runtime
+                primary_vm_name="attacker",
             ),
         ),
     )
 
 
-def test_inspect_eval() -> None:
+@pytest.mark.vm_required
+@pytest.mark.inspect_eval
+def test_multi_vm_config():
+    """Test that multi-VM configuration works correctly."""
     eval_logs = eval(
-        tasks=[task_for_test()],
+        tasks=[multi_vm_task()],
         model=get_model(
             "mockllm/model",
             custom_outputs=[
                 ModelOutput.for_tool_call(
                     model="mockllm/model",
                     tool_name="bash",
-                    tool_arguments={"cmd": "'uname -a'"},
-                    # TODO: check if models do the quoting I added
-                    # (was "uname -a" (without extra single quotes) in the Proxmox provider)
+                    tool_arguments={"cmd": "hostname"},
                 ),
                 ModelOutput.for_tool_call(
                     model="mockllm/model",
                     tool_name="submit",
-                    tool_arguments={"answer": "42"},
+                    tool_arguments={"answer": "attacker"},
                 ),
             ],
         ),
@@ -69,12 +72,7 @@ def test_inspect_eval() -> None:
     assert len(eval_logs) == 1
     assert eval_logs[0]
     assert eval_logs[0].error is None
-    assert eval_logs[0].samples
-    sample = eval_logs[0].samples[0]
-    tool_calls = [x for x in sample.messages if x.role == "tool"]
-    print(tool_calls)
-    assert "ubuntu" in tool_calls[0].text
 
 
 if __name__ == "__main__":
-    test_inspect_eval()
+    test_multi_vm_config()

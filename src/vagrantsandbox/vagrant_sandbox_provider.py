@@ -1,8 +1,8 @@
 import asyncio
 import functools
-import itertools
 from os import getenv
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 from typing import Any, Callable, TypeVar, TypedDict, assert_never, override
@@ -28,6 +28,21 @@ class ExecCommandReturn(TypedDict):
 
 
 class Vagrant(BaseVagrant):
+    logger = getLogger(__name__)
+
+    async def get_vm_names(self) -> list[str | None]:
+        """Get list of VM names defined in the Vagrantfile."""
+        try:
+            # Use python-vagrant's built-in status method
+            status_info = await _run_in_executor(self.status)
+            vm_names = [vm["name"] for vm in status_info]
+            self.logger.debug(f"get_vm_names status_info: {status_info}")
+            self.logger.debug(f"get_vm_names extracted names: {vm_names}")
+            return vm_names
+        except Exception as e:
+            self.logger.debug(f"get_vm_names failed: {e}")
+            return []
+
     async def _run_vagrant_command_async(self, args) -> ExecCommandReturn:
         """
         Run a vagrant command and return everything, not just stdout.
@@ -38,11 +53,15 @@ class Vagrant(BaseVagrant):
         """
         # Make subprocess command
         command = self._make_vagrant_command(args)
-        print("VAGRANTCOMmAND", command)
-        print("VAGRANTC12", *command)
+        self.logger.debug(f"Vagrant command: {command}")
+        self.logger.debug(f"Working directory: {self.root}")
+        self.logger.debug(
+            f"Environment variables: {dict(self.env) if self.env else 'None'}"
+        )
 
         result = await asyncio.create_subprocess_exec(
             *command,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=self.root,
@@ -74,7 +93,7 @@ class Vagrant(BaseVagrant):
         extra_ssh_args: Corresponds to '--' option in the vagrant ssh command
         Returns the output of running the command.
         """
-        cmd = ["ssh", vm_name, "--command", command]
+        cmd = ["ssh", vm_name, "--no-tty", "--command", command]
         if extra_ssh_args is not None:
             cmd += ["--", extra_ssh_args]
 
@@ -88,24 +107,10 @@ class VagrantSandboxEnvironmentConfig(BaseModel, frozen=True):
     vagrantfile_path: str = Field(
         default_factory=lambda: getenv("VAGRANTFILE_PATH", "./Vagrantfile")
     )
-    # port: int = Field(default_factory=lambda: int(getenv("PROXMOX_PORT", "8006")))
-    # user: str = Field(default_factory=lambda: getenv("PROXMOX_USER", "root"))
-    # user_realm: str = Field(default_factory=lambda: getenv("PROXMOX_REALM", "pam"))
-    # password: str = Field(
-    #     default_factory=lambda: getenv("PROXMOX_PASSWORD", "password")
-    # )
-    # node: str = Field(default_factory=lambda: getenv("PROXMOX_NODE", "proxmox"))
-    # verify_tls: bool = Field(
-    #     default_factory=lambda: getenv("PROXMOX_VERIFY_TLS", "1") == "1"
-    # )
-
-    # @classmethod
-    # def config_files(cls) -> list[str]:
-    #     ...
-
-    # @classmethod
-    # def default_concurrency(cls) -> int | None:
-    #     ...
+    primary_vm_name: str | None = Field(
+        default=None,
+        description="Name of the VM to use as the 'default' sandbox environment. If None, uses first available VM.",
+    )
 
 
 async def _run_in_executor(func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
@@ -128,9 +133,11 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         self,
         tmpdir_context: aiofiles.tempfile.AiofilesContextManagerTempDir,
         vagrant: Vagrant,
+        vm_name: str | None = None,
     ):
         self.vagrant = vagrant
         self.tmpdir_context = tmpdir_context
+        self.vm_name = vm_name
 
     @classmethod
     async def task_init(
@@ -162,17 +169,155 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             (Path(tmpdir) / "Vagrantfile").as_posix(),
         )
 
-        vagrant = Vagrant(root=tmpdir)
+        # Create unique suffix from sample metadata to avoid VM name conflicts
+        sample_id = metadata.get("sample_id", "unknown")
+        unique_suffix = (
+            f"-{sample_id[:8]}"
+            if sample_id != "unknown"
+            else f"-{hash(tmpdir) % 10000:04d}"
+        )
+        cls.logger.info(f"Using unique VM suffix: {unique_suffix}")
+
+        # Set environment variable for Vagrantfile to use
+        import os
+
+        vagrant_env = os.environ.copy()
+        vagrant_env["INSPECT_VM_SUFFIX"] = unique_suffix
+
+        vagrant = Vagrant(root=tmpdir, env=vagrant_env)
+
+        # Get available VMs before starting them
+        try:
+            vm_names = await vagrant.get_vm_names()
+            cls.logger.info(f"Discovered VMs in Vagrantfile: {vm_names}")
+        except Exception as e:
+            cls.logger.error(
+                f"Failed to get VM names: {e}. Assuming single-VM Vagrantfile."
+            )
+            vm_names = []
+
+        # If no VMs found, assume single-VM Vagrantfile
+        if not vm_names:
+            cls.logger.info("No VMs discovered, assuming single-VM Vagrantfile")
+            vm_names = [None]  # None means default/single VM
 
         try:
-            await _run_in_executor(vagrant.up)
+            # Start all VMs
+            cls.logger.info(f"Starting VMs: {vm_names}")
+            cls.logger.info(f"Vagrant working directory: {tmpdir}")
+            cls.logger.info(
+                f"Environment variables: INSPECT_VM_SUFFIX={vagrant_env.get('INSPECT_VM_SUFFIX')}"
+            )
+
+            # Log the Vagrantfile content for debugging
+            vagrantfile_path = Path(tmpdir) / "Vagrantfile"
+            try:
+                with open(vagrantfile_path, "r") as f:
+                    vagrantfile_content = f.read()
+                    cls.logger.debug(f"Vagrantfile contents:\n{vagrantfile_content}")
+            except Exception as read_error:
+                cls.logger.error(f"Could not read Vagrantfile: {read_error}")
+
+            # First check current status before trying to start
+            try:
+                initial_status = await vagrant._run_vagrant_command_async(["status"])
+                cls.logger.info(f"Initial VM status: {initial_status['stdout']}")
+            except Exception as status_error:
+                cls.logger.info(
+                    f"Could not get initial status (this is normal for new VMs): {status_error}"
+                )
+
+            # Use our async method to capture stdout/stderr on failure
+            up_result = await vagrant._run_vagrant_command_async(["up"])
+            cls.logger.info("All VMs started successfully")
+            if up_result["stdout"]:
+                cls.logger.debug(f"Vagrant up stdout: {up_result['stdout']}")
+            if up_result["stderr"]:
+                cls.logger.debug(f"Vagrant up stderr: {up_result['stderr']}")
+
+            # Check if command actually succeeded
+            if up_result["returncode"] != 0:
+                error = subprocess.CalledProcessError(
+                    up_result["returncode"], ["vagrant", "up"]
+                )
+                error.stdout = up_result["stdout"]
+                error.stderr = up_result["stderr"]
+                raise error
         except subprocess.CalledProcessError as e:
-            cls.logger.error(e.stderr)
+            cls.logger.error(f"Failed to start VMs. Return code: {e.returncode}")
+            cls.logger.error(f"Command that failed: {e.cmd}")
+
+            # Display captured output
+            if hasattr(e, "stdout") and e.stdout:
+                cls.logger.error(f"Vagrant stdout: {e.stdout}")
+            if hasattr(e, "stderr") and e.stderr:
+                cls.logger.error(f"Vagrant stderr: {e.stderr}")
+
+            # Try to get more info with vagrant status and logs
+            try:
+                status_result = await vagrant._run_vagrant_command_async(["status"])
+                cls.logger.error(f"Post-failure VM status: {status_result['stdout']}")
+                if status_result["stderr"]:
+                    cls.logger.error(
+                        f"Post-failure status stderr: {status_result['stderr']}"
+                    )
+            except Exception as status_error:
+                cls.logger.error(f"Could not get post-failure status: {status_error}")
+
+            # Try to get vagrant global-status to see if there are conflicting VMs
+            try:
+                global_status = await vagrant._run_vagrant_command_async(
+                    ["global-status"]
+                )
+                cls.logger.error(f"Global VM status: {global_status['stdout']}")
+            except Exception as global_error:
+                cls.logger.error(f"Could not get global status: {global_error}")
+
             raise e
 
         sandboxes: dict[str, SandboxEnvironment] = {}
-        vagrant_sandbox_environment = VagrantSandboxEnvironment(tmpdir_context, vagrant)
-        sandboxes["default"] = vagrant_sandbox_environment
+
+        # Determine which VM should be the default
+        # The primary_vm_name from config needs to be matched with the actual VM names (which include suffix)
+        primary_vm_base = config.primary_vm_name
+        primary_vm = None
+
+        if primary_vm_base:
+            # Find VM that starts with the base name (handles suffix)
+            for vm_name in vm_names:
+                if vm_name and vm_name.startswith(primary_vm_base):
+                    primary_vm = vm_name
+                    break
+
+            if not primary_vm:
+                available_vms = [vm for vm in vm_names if vm is not None]
+                cls.logger.warning(
+                    f"Primary VM starting with '{primary_vm_base}' not found. "
+                    f"Available VMs: {available_vms}. Using first available VM."
+                )
+                primary_vm = vm_names[0] if vm_names else None
+        else:
+            primary_vm = vm_names[0] if vm_names else None
+
+        # Create sandbox environments for each VM
+        cls.logger.info(f"Creating sandbox environments. Primary VM: {primary_vm}")
+        for vm_name in vm_names:
+            env = VagrantSandboxEnvironment(tmpdir_context, vagrant, vm_name)
+            cls.logger.debug(f"Created environment for VM: {vm_name}")
+
+            # The primary VM becomes "default"
+            if vm_name == primary_vm:
+                sandboxes["default"] = env
+                cls.logger.info(f"Set '{vm_name}' as default sandbox environment")
+
+            # Also add by VM name if it's not None (multi-VM case)
+            if vm_name is not None:
+                sandboxes[vm_name] = env
+
+        # Ensure we always have a "default" sandbox
+        if "default" not in sandboxes and sandboxes:
+            first_key = next(iter(sandboxes))
+            sandboxes["default"] = sandboxes[first_key]
 
         # borrowed from k8s provider
         def reorder_default_first(
@@ -198,7 +343,6 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         if not interrupted:
             for env in environments.values():
                 if isinstance(env, VagrantSandboxEnvironment):
-                    # TODO: teardown group if more than one?
                     await _run_in_executor(env.vagrant.destroy)
                     await env.tmpdir_context.__aexit__(None, None, None)
         return None
@@ -218,25 +362,24 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             raise ValueError("config must be a VagrantSandboxEnvironmentConfig")
 
         if cleanup:
-            print("NOT IMPLEMENTED!")
+            cls.logger.warning("Task cleanup not implemented yet")
             # TODO:
             # Figure out how to clean up instances
         else:
-            print(
-                "\nCleanup all sandbox releases with: "
-                "[blue]inspect sandbox cleanup vagrant[/blue]\n"
+            cls.logger.info(
+                "Cleanup all sandbox releases with: inspect sandbox cleanup vagrant"
             )
 
     @classmethod
     @override
     async def cli_cleanup(cls, id: str | None) -> None:
         if id is None:
-            config = VagrantSandboxEnvironmentConfig()
+            config = VagrantSandboxEnvironmentConfig()  # noqa: F841
             vagrant = Vagrant()
             await _run_in_executor(vagrant.destroy)
             # TODO: is this right?
         else:
-            print("\n[red]Cleanup by ID not implemented[/red]\n")
+            cls.logger.warning("Cleanup by ID not implemented")
 
     @classmethod
     @override
@@ -254,29 +397,14 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         timeout: int | None = None,
         timeout_retry: bool = True,
     ) -> ExecResult[str]:
-        # tmp_start = f"/tmp/{__name__}{time.time_ns()}_"
-
-        # @tenacity.retry(
-        #     wait=tenacity.wait_exponential(min=0.1, exp_base=1.3),
-        #     stop=tenacity.stop_after_delay(timeout)
-        #     if timeout is not None
-        #     else tenacity.stop_never,
-        #     retry=tenacity.retry_if_result(lambda x: x is False),
-        # )
-
-        command = " ".join(
-            itertools.chain.from_iterable(
-                item.split() if isinstance(item, str) else item for item in cmd
-            )
-        )
-
+        command = " ".join(cmd)
         with trace_action(
             self.logger,
             self.TRACE_NAME,
             # f"exec_command {self.vm_id=} {exec_response_pid=}",
             "exec_command ",
         ):
-            result = await self.vagrant.ssh(command=command)
+            result = await self.vagrant.ssh(vm_name=self.vm_name, command=command)
 
             return ExecResult(
                 success=result["returncode"] == 0,
@@ -295,27 +423,21 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         else:
             assert_never(contents)  # type: ignore[arg-type]
 
-        command = " ".join(
-                [
-                    "echo",
-                    contents_str,
-                    ">",
-                    file,
-                ]
-            ),
-        result = await self.vagrant.ssh(
-            command=command
-        )
+        command = f"printf %s {shlex.quote(contents_str)} > {shlex.quote(file)}"
+        result = await self.vagrant.ssh(vm_name=self.vm_name, command=command)
         if result["returncode"] != 0:
-            raise subprocess.CalledProcessError(result["returncode"], command, result["stdout"])
-
+            raise subprocess.CalledProcessError(
+                result["returncode"], command, result["stdout"]
+            )
 
     @override
     async def read_file(self, file: str, text: bool = True) -> str | bytes:  # type: ignore
-        command = f"cat f{file}"
-        result = await self.vagrant.ssh(command=command)
+        command = f"cat {file}"
+        result = await self.vagrant.ssh(vm_name=self.vm_name, command=command)
         if result["returncode"] != 0:
-            raise subprocess.CalledProcessError(result["returncode"], command, result["stdout"])
+            raise subprocess.CalledProcessError(
+                result["returncode"], command, result["stdout"]
+            )
 
         return result["stdout"]
         # type-ignore is because Mypy complains that this override doesn't implement bytes return
@@ -341,4 +463,8 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
            NotImplementedError: For sandboxes that don't provide connections
            ConnectionError: If sandbox is not currently running.
         """
-        return SandboxConnection(type="vagrant", command="vagrant ssh")
+        tmpdir = self.tmpdir_context.__str__()
+        return SandboxConnection(
+            type="vagrant",
+            command=f"VAGRANT_CWD={tmpdir} vagrant ssh",
+        )
