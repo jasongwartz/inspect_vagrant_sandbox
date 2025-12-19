@@ -135,45 +135,12 @@ def cleanup_sandbox_directory(path: Path) -> bool:
     return False
 
 
-def cleanup_all_sandbox_directories() -> int:
-    """Remove all sandbox directories. Returns count of directories removed."""
-    logger = getLogger(__name__)
-    directories = list_sandbox_directories()
-    removed = 0
-    for path in directories:
-        if cleanup_sandbox_directory(path):
-            removed += 1
-    logger.info(f"Cleaned up {removed}/{len(directories)} sandbox directories")
-    return removed
-
-
 async def cleanup_sandbox_with_vms(path: Path) -> bool:
     """Destroy VMs and remove a sandbox directory. Returns True if successful."""
     # First destroy any VMs
     await destroy_sandbox_vms(path)
     # Then remove the directory
     return await asyncio.to_thread(cleanup_sandbox_directory, path)
-
-
-async def cleanup_all_sandboxes_with_vms() -> int:
-    """Destroy all VMs and remove all sandbox directories. Returns count removed."""
-    _logger = getLogger(__name__)
-    directories = list_sandbox_directories()
-
-    if not directories:
-        _logger.info("No sandbox directories to clean up")
-        return 0
-
-    _logger.info(f"Found {len(directories)} sandbox directories to clean up")
-    removed = 0
-
-    for path in directories:
-        _logger.info(f"Cleaning up sandbox: {path.name}")
-        if await cleanup_sandbox_with_vms(path):
-            removed += 1
-
-    _logger.info(f"Cleaned up {removed}/{len(directories)} sandboxes")
-    return removed
 
 
 class ExecCommandReturn(TypedDict):
@@ -317,9 +284,6 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         if config is not None:
             if not isinstance(config, VagrantSandboxEnvironmentConfig):
                 raise ValueError("config must be a VagrantSandboxEnvironmentConfig")
-            # async_proxmox_api = cls._create_async_proxmox_api(config)
-            # await ProxmoxSandboxEnvironment.ensure_vms(async_proxmox_api, config)
-        return None
 
     @classmethod
     @override
@@ -541,7 +505,6 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                         cls.logger.warning(f"Failed to destroy VM: {e}")
 
                     await env.sandbox_dir.cleanup()
-        return None
 
     @classmethod
     @override
@@ -676,13 +639,6 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
 
         Returns:
            SandboxConnection: connection information.
-
-        Raises:
-           NotImplementedError: For sandboxes that don't provide connections
-           ConnectionError: If sandbox is not currently running.
-        """
-        """
-        Returns a connection to the sandbox.
 
         Raises:
            NotImplementedError: For sandboxes that don't provide connections
