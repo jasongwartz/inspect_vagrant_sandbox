@@ -69,11 +69,12 @@ class SandboxDirectory:
     async def cleanup(self) -> None:
         """Remove the sandbox directory."""
         if self.path.exists():
-            try:
-                await asyncio.to_thread(shutil.rmtree, self.path)
-                self.logger.debug(f"Cleaned up sandbox directory: {self.path}")
-            except Exception as e:
-                self.logger.warning(f"Failed to clean up {self.path}: {e}")
+            await asyncio.to_thread(shutil.rmtree, self.path)
+            self.logger.debug(f"Cleaned up sandbox directory: {self.path}")
+        else:
+            self.logger.warning(
+                f"Unable to clean up sandbox directory, does not exist: {self.path}"
+            )
 
     def __str__(self) -> str:
         return str(self.path)
@@ -105,31 +106,29 @@ def list_sandbox_directories() -> list[Path]:
     return [p for p in base_dir.iterdir() if p.is_dir()]
 
 
-def cleanup_sandbox_directory(path: Path) -> bool:
-    """Remove a specific sandbox directory. Returns True if successful."""
+def cleanup_sandbox_directory(path: Path) -> None:
+    """Remove a specific sandbox directory."""
     logger = getLogger(__name__)
-    try:
-        if path.exists() and path.is_dir():
-            # Safety check: only delete if it's under our cache directory
-            base_dir = get_sandbox_cache_dir()
-            if base_dir in path.parents or path.parent == base_dir:
-                shutil.rmtree(path)
-                logger.info(f"Cleaned up sandbox directory: {path}")
-                return True
-            else:
-                logger.warning(f"Refusing to delete directory outside cache: {path}")
-                return False
-    except Exception as e:
-        logger.error(f"Failed to clean up {path}: {e}")
-    return False
+
+    if not path.exists():
+        return
+
+    if not path.is_dir():
+        raise ValueError(f"Path is not a directory: {path}")
+
+    # Safety check: only delete if it's under our cache directory
+    base_dir = get_sandbox_cache_dir()
+    if base_dir not in path.parents and path.parent != base_dir:
+        raise ValueError(f"Refusing to delete directory outside cache: {path}")
+
+    shutil.rmtree(path)
+    logger.info(f"Cleaned up sandbox directory: {path}")
 
 
-async def cleanup_sandbox_with_vms(path: Path) -> bool:
-    """Destroy VMs and remove a sandbox directory. Returns True if successful."""
-    # First destroy any VMs
+async def cleanup_sandbox_with_vms(path: Path) -> None:
+    """Destroy VMs and remove a sandbox directory."""
     await destroy_sandbox_vms(path)
-    # Then remove the directory
-    return await asyncio.to_thread(cleanup_sandbox_directory, path)
+    await asyncio.to_thread(cleanup_sandbox_directory, path)
 
 
 class ExecCommandReturn(TypedDict):
@@ -474,24 +473,19 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                         continue
                     seen_ids.add(env_id)
 
-                    # Check if sandbox directory still exists before cleanup
                     if not env.sandbox_dir.path.exists():
                         cls.logger.warning(
                             f"Sandbox directory already deleted: {env.sandbox_dir.path}"
                         )
                         continue
 
-                    # Use async vagrant command to avoid cwd issues with subprocess
-                    try:
-                        result = await env.vagrant._run_vagrant_command_async(
-                            ["destroy", "-f"]
+                    result = await env.vagrant._run_vagrant_command_async(
+                        ["destroy", "-f"]
+                    )
+                    if result["returncode"] != 0:
+                        cls.logger.warning(
+                            f"vagrant destroy returned {result['returncode']}: {result['stderr']}"
                         )
-                        if result["returncode"] != 0:
-                            cls.logger.warning(
-                                f"vagrant destroy returned {result['returncode']}: {result['stderr']}"
-                            )
-                    except Exception as e:
-                        cls.logger.warning(f"Failed to destroy VM: {e}")
 
                     await env.sandbox_dir.cleanup()
 
@@ -503,15 +497,24 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         config: SandboxEnvironmentConfigType | None,
         cleanup: bool,
     ) -> None:
-        # NOTE: We don't clean up ALL sandboxes here because other tasks may be
-        # running in parallel. Each sample's sandboxes are cleaned up in sample_cleanup.
-        # Use `inspect sandbox cleanup vagrant` for manual cleanup of orphaned sandboxes.
         cache_dir = get_sandbox_cache_dir()
         directories = list_sandbox_directories()
-        if directories:
+
+        if not directories:
+            return
+
+        if cleanup:
+            cls.logger.info(f"Cleaning up {len(directories)} sandbox(es)")
+            for path in directories:
+                try:
+                    await cleanup_sandbox_with_vms(path)
+                except Exception as e:
+                    cls.logger.error(f"Failed to clean up {path}: {e}")
+        else:
+            cls.logger.info(f"Sandbox cache directory: {cache_dir}")
+            for path in directories:
+                cls.logger.info(f"  {path.name}")
             cls.logger.info(
-                f"Sandbox directories stored in: {cache_dir}\n"
-                f"Found {len(directories)} sandbox(es)\n"
                 "Cleanup orphaned sandboxes with: inspect sandbox cleanup vagrant"
             )
 
@@ -533,11 +536,9 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             for path in directories:
                 print(f"  Cleaning up: {path.name}...", end=" ", flush=True)
                 try:
-                    if await cleanup_sandbox_with_vms(path):
-                        print("done")
-                        removed += 1
-                    else:
-                        print("FAILED")
+                    await cleanup_sandbox_with_vms(path)
+                    print("done")
+                    removed += 1
                 except Exception as e:
                     print(f"FAILED: {e}")
                     cls.logger.error(f"Failed to clean up {path}: {e}")
@@ -550,10 +551,8 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             if sandbox_path.exists():
                 print(f"Cleaning up sandbox: {id}...", end=" ", flush=True)
                 try:
-                    if await cleanup_sandbox_with_vms(sandbox_path):
-                        print("done")
-                    else:
-                        print("FAILED")
+                    await cleanup_sandbox_with_vms(sandbox_path)
+                    print("done")
                 except Exception as e:
                     print(f"FAILED: {e}")
                     cls.logger.error(f"Failed to clean up {sandbox_path}: {e}")
