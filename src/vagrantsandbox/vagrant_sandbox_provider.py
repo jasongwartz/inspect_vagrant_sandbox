@@ -76,6 +76,35 @@ class SandboxDirectory:
         return str(self.path)
 
 
+async def destroy_sandbox_vms(sandbox_path: Path) -> bool:
+    """
+    Destroy any Vagrant VMs in a sandbox directory.
+
+    Returns True if successful or no VMs to destroy, False on error.
+    """
+    logger = getLogger(__name__)
+    vagrant_dir = sandbox_path / ".vagrant"
+
+    if not vagrant_dir.exists():
+        logger.debug(f"No .vagrant directory in {sandbox_path}, skipping destroy")
+        return True
+
+    try:
+        logger.info(f"Destroying VMs in {sandbox_path}")
+        vagrant = Vagrant(root=str(sandbox_path))
+        # Use force flag to avoid prompts
+        result = await vagrant._run_vagrant_command_async(["destroy", "-f"])
+        if result["returncode"] != 0:
+            logger.warning(
+                f"vagrant destroy returned {result['returncode']}: {result['stderr']}"
+            )
+            # Still return True - the directory can be cleaned up even if destroy fails
+        return True
+    except Exception as e:
+        logger.error(f"Failed to destroy VMs in {sandbox_path}: {e}")
+        return False
+
+
 def list_sandbox_directories() -> list[Path]:
     """List all sandbox directories in the cache."""
     base_dir = get_sandbox_cache_dir()
@@ -112,6 +141,35 @@ def cleanup_all_sandbox_directories() -> int:
         if cleanup_sandbox_directory(path):
             removed += 1
     logger.info(f"Cleaned up {removed}/{len(directories)} sandbox directories")
+    return removed
+
+
+async def cleanup_sandbox_with_vms(path: Path) -> bool:
+    """Destroy VMs and remove a sandbox directory. Returns True if successful."""
+    # First destroy any VMs
+    await destroy_sandbox_vms(path)
+    # Then remove the directory
+    return await asyncio.to_thread(cleanup_sandbox_directory, path)
+
+
+async def cleanup_all_sandboxes_with_vms() -> int:
+    """Destroy all VMs and remove all sandbox directories. Returns count removed."""
+    _logger = getLogger(__name__)
+    directories = list_sandbox_directories()
+
+    if not directories:
+        _logger.info("No sandbox directories to clean up")
+        return 0
+
+    _logger.info(f"Found {len(directories)} sandbox directories to clean up")
+    removed = 0
+
+    for path in directories:
+        _logger.info(f"Cleaning up sandbox: {path.name}")
+        if await cleanup_sandbox_with_vms(path):
+            removed += 1
+
+    _logger.info(f"Cleaned up {removed}/{len(directories)} sandboxes")
     return removed
 
 
@@ -475,11 +533,14 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         if cleanup:
             cache_dir = get_sandbox_cache_dir()
             cls.logger.info(f"Cleaning up all sandboxes in: {cache_dir}")
-            await asyncio.to_thread(cleanup_all_sandbox_directories)
+            removed = await cleanup_all_sandboxes_with_vms()
+            cls.logger.info(f"Cleaned up {removed} sandboxes (VMs destroyed)")
         else:
             cache_dir = get_sandbox_cache_dir()
+            directories = list_sandbox_directories()
             cls.logger.info(
                 f"Sandbox directories stored in: {cache_dir}\n"
+                f"Found {len(directories)} sandbox(es)\n"
                 "Cleanup all sandbox releases with: inspect sandbox cleanup vagrant"
             )
 
@@ -487,19 +548,17 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
     @override
     async def cli_cleanup(cls, id: str | None) -> None:
         if id is None:
-            # Clean up all sandbox directories in user cache
+            # Clean up all sandbox directories (destroy VMs first)
             cache_dir = get_sandbox_cache_dir()
             cls.logger.info(f"Cleaning up all sandboxes in: {cache_dir}")
-            removed = await asyncio.to_thread(cleanup_all_sandbox_directories)
-            cls.logger.info(f"Removed {removed} sandbox directories")
+            removed = await cleanup_all_sandboxes_with_vms()
+            cls.logger.info(f"Removed {removed} sandboxes")
         else:
             # Clean up specific sandbox by ID (directory name)
             cache_dir = get_sandbox_cache_dir()
             sandbox_path = cache_dir / id
             if sandbox_path.exists():
-                success = await asyncio.to_thread(
-                    cleanup_sandbox_directory, sandbox_path
-                )
+                success = await cleanup_sandbox_with_vms(sandbox_path)
                 if success:
                     cls.logger.info(f"Cleaned up sandbox: {id}")
                 else:

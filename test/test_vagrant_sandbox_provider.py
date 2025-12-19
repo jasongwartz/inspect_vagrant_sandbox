@@ -373,7 +373,7 @@ class TestVagrantSandboxEnvironment:
     async def test_cli_cleanup_no_id(self):
         """Test CLI cleanup without specific ID."""
         with patch(
-            "vagrantsandbox.vagrant_sandbox_provider.cleanup_all_sandbox_directories"
+            "vagrantsandbox.vagrant_sandbox_provider.cleanup_all_sandboxes_with_vms"
         ) as mock_cleanup:
             mock_cleanup.return_value = 0
             await VagrantSandboxEnvironment.cli_cleanup(None)
