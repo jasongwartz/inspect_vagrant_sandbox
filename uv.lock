@@ -456,8 +456,8 @@ name = "inspect-vagrant-sandbox"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "aiofiles" },
     { name = "inspect-ai" },
+    { name = "platformdirs" },
     { name = "python-vagrant" },
 ]
 
@@ -474,8 +474,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aiofiles", specifier = ">=24.1.0" },
     { name = "inspect-ai", specifier = ">=0.3.123" },
+    { name = "platformdirs", specifier = ">=4.0.0" },
     { name = "python-vagrant", specifier = ">=1.0.0" },
 ]
 

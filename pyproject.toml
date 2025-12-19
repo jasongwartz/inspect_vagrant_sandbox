@@ -5,8 +5,8 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "aiofiles>=24.1.0",
     "inspect-ai>=0.3.123",
+    "platformdirs>=4.0.0",
     "python-vagrant>=1.0.0",
 ]
 
@@ -37,3 +37,4 @@ files = ["src"]
 exclude = [
     "^__init__\\.py$",
 ]
+

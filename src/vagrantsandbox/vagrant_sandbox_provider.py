@@ -1,16 +1,27 @@
 import asyncio
-import functools
+import os
 from os import getenv
 from pathlib import Path
 import shlex
 import shutil
 import subprocess
-from typing import Any, Callable, TypeVar, TypedDict, assert_never, override
+import uuid
+from typing import (
+    Any,
+    Callable,
+    Coroutine,
+    Literal,
+    TypeVar,
+    TypedDict,
+    assert_never,
+    overload,
+    override,
+)
 from logging import getLogger
 from vagrant import Vagrant as BaseVagrant
 from pydantic import BaseModel, Field
+from platformdirs import user_cache_dir
 
-import aiofiles  # type: ignore
 from inspect_ai.util import (
     ExecResult,
     SandboxConnection,
@@ -19,6 +30,114 @@ from inspect_ai.util import (
     SandboxEnvironmentConfigType,
     trace_action,
 )
+
+
+# This value will be used to create directories like eg.
+# `~/.cache/inspect-vagrant-sandbox/...` or equivalent on other
+# operating systems.
+SANDBOX_VAGRANTFILE_CONFIG_DIRECTORY_NAME = "inspect-vagrant-sandbox"
+
+
+def get_sandbox_cache_dir() -> Path:
+    """Get the base cache directory for vagrant sandboxes."""
+    return Path(user_cache_dir(SANDBOX_VAGRANTFILE_CONFIG_DIRECTORY_NAME))
+
+
+class SandboxDirectory:
+    """
+    Manages sandbox directories stored in user cache.
+
+    Unlike TemporaryDirectory, these persist until explicitly cleaned up,
+    making them easier to locate and manage.
+    """
+
+    logger = getLogger(__name__)
+
+    def __init__(self, path: Path):
+        self.path = path
+
+    @classmethod
+    async def create(cls, sample_id: str | None = None) -> "SandboxDirectory":
+        """Create a new sandbox directory in user cache."""
+        base_dir = get_sandbox_cache_dir()
+        await asyncio.to_thread(base_dir.mkdir, parents=True, exist_ok=True)
+
+        # Create unique subdirectory name
+        short_uuid = uuid.uuid4().hex[:8]
+        if sample_id and sample_id != "unknown":
+            subdir_name = f"{sample_id[:8]}-{short_uuid}"
+        else:
+            subdir_name = short_uuid
+
+        path = base_dir / subdir_name
+        await asyncio.to_thread(path.mkdir, exist_ok=True)
+
+        cls.logger.debug(f"Created sandbox directory: {path}")
+        return cls(path)
+
+    async def cleanup(self) -> None:
+        """Remove the sandbox directory."""
+        if self.path.exists():
+            await asyncio.to_thread(shutil.rmtree, self.path)
+            self.logger.debug(f"Cleaned up sandbox directory: {self.path}")
+        else:
+            self.logger.warning(
+                f"Unable to clean up sandbox directory, does not exist: {self.path}"
+            )
+
+    def __str__(self) -> str:
+        return str(self.path)
+
+
+async def destroy_sandbox_vms(sandbox_path: Path) -> None:
+    """Destroy any Vagrant VMs in a sandbox directory."""
+    logger = getLogger(__name__)
+    vagrant_dir = sandbox_path / ".vagrant"
+
+    if not vagrant_dir.exists():
+        logger.debug(f"No .vagrant directory in {sandbox_path}, skipping destroy")
+        return
+
+    logger.info(f"Destroying VMs in {sandbox_path}")
+    vagrant = Vagrant(root=str(sandbox_path))
+    result = await vagrant._run_vagrant_command_async(["destroy", "-f"])
+    if result["returncode"] != 0:
+        logger.warning(
+            f"vagrant destroy returned {result['returncode']}: {result['stderr']}"
+        )
+
+
+def list_sandbox_directories() -> list[Path]:
+    """List all sandbox directories in the cache."""
+    base_dir = get_sandbox_cache_dir()
+    if not base_dir.exists():
+        return []
+    return [p for p in base_dir.iterdir() if p.is_dir()]
+
+
+def cleanup_sandbox_directory(path: Path) -> None:
+    """Remove a specific sandbox directory."""
+    logger = getLogger(__name__)
+
+    if not path.exists():
+        return
+
+    if not path.is_dir():
+        raise ValueError(f"Path is not a directory: {path}")
+
+    # Safety check: only delete if it's under our cache directory
+    base_dir = get_sandbox_cache_dir()
+    if base_dir not in path.parents and path.parent != base_dir:
+        raise ValueError(f"Refusing to delete directory outside cache: {path}")
+
+    shutil.rmtree(path)
+    logger.info(f"Cleaned up sandbox directory: {path}")
+
+
+async def cleanup_sandbox_with_vms(path: Path) -> None:
+    """Destroy VMs and remove a sandbox directory."""
+    await destroy_sandbox_vms(path)
+    await asyncio.to_thread(cleanup_sandbox_directory, path)
 
 
 class ExecCommandReturn(TypedDict):
@@ -101,7 +220,7 @@ class Vagrant(BaseVagrant):
         command: str | None = None,
         extra_ssh_args: str | None = None,
         input: str | bytes | None = None,
-    ):
+    ) -> Coroutine[Any, Any, ExecCommandReturn]:
         """
         Execute a command via ssh on the vm specified.
         command: The command to execute via ssh.
@@ -130,11 +249,8 @@ class VagrantSandboxEnvironmentConfig(BaseModel, frozen=True):
 
 
 async def _run_in_executor(func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
-    """Run a function in the thread pool executor."""
-    # TODO: is it necessary to allow passing a custom executor?
-    return await asyncio.get_event_loop().run_in_executor(
-        None, functools.partial(func, *args, **kwargs)
-    )
+    """Run a synchronous function in a thread pool."""
+    return await asyncio.to_thread(func, *args, **kwargs)
 
 
 @sandboxenv(name="vagrant")
@@ -147,12 +263,12 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
 
     def __init__(
         self,
-        tmpdir_context: aiofiles.tempfile.AiofilesContextManagerTempDir,
+        sandbox_dir: SandboxDirectory,
         vagrant: Vagrant,
         vm_name: str | None = None,
     ):
         self.vagrant = vagrant
-        self.tmpdir_context = tmpdir_context
+        self.sandbox_dir = sandbox_dir
         self.vm_name = vm_name
 
     @classmethod
@@ -162,9 +278,6 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         if config is not None:
             if not isinstance(config, VagrantSandboxEnvironmentConfig):
                 raise ValueError("config must be a VagrantSandboxEnvironmentConfig")
-            # async_proxmox_api = cls._create_async_proxmox_api(config)
-            # await ProxmoxSandboxEnvironment.ensure_vms(async_proxmox_api, config)
-        return None
 
     @classmethod
     @override
@@ -175,37 +288,39 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         metadata: dict[str, str],
     ) -> dict[str, SandboxEnvironment]:
         config = config or VagrantSandboxEnvironmentConfig()
-        assert isinstance(config, VagrantSandboxEnvironmentConfig)
-
-        tmpdir_context = aiofiles.tempfile.TemporaryDirectory()
-        tmpdir = await tmpdir_context.__aenter__()
-        await asyncio.to_thread(
-            shutil.copy2,
-            config.vagrantfile_path,
-            (Path(tmpdir) / "Vagrantfile").as_posix(),
-        )
+        if not isinstance(config, VagrantSandboxEnvironmentConfig):
+            raise TypeError(
+                f"config must be VagrantSandboxEnvironmentConfig, got {type(config).__name__}"
+            )
 
         # Create unique suffix from sample metadata to avoid VM name conflicts
         sample_id = metadata.get("sample_id", "unknown")
-        unique_suffix = (
-            f"-{sample_id[:8]}"
-            if sample_id != "unknown"
-            else f"-{hash(tmpdir) % 10000:04d}"
+
+        # Use SandboxDirectory for user-local cache storage (easier to locate/cleanup)
+        sandbox_dir = await SandboxDirectory.create(sample_id=sample_id)
+
+        await asyncio.to_thread(
+            shutil.copy2,
+            config.vagrantfile_path,
+            (sandbox_dir.path / "Vagrantfile").as_posix(),
         )
-        cls.logger.info(f"Using unique VM suffix: {unique_suffix}")
+
+        # Use the sandbox directory name as the unique suffix - it already contains
+        # both the sample_id prefix and a UUID, making it truly unique per test instance
+        unique_suffix = f"-{sandbox_dir.path.name}"
+        cls.logger.debug(f"Using unique VM suffix: {unique_suffix}")
+        cls.logger.debug(f"Sandbox directory: {sandbox_dir.path}")
 
         # Set environment variable for Vagrantfile to use
-        import os
-
         vagrant_env = os.environ.copy()
         vagrant_env["INSPECT_VM_SUFFIX"] = unique_suffix
 
-        vagrant = Vagrant(root=tmpdir, env=vagrant_env)
+        vagrant = Vagrant(root=str(sandbox_dir), env=vagrant_env)
 
         # Get available VMs before starting them
         try:
             vm_names = await vagrant.get_vm_names()
-            cls.logger.info(f"Discovered VMs in Vagrantfile: {vm_names}")
+            cls.logger.debug(f"Discovered VMs in Vagrantfile: {vm_names}")
         except Exception as e:
             cls.logger.error(
                 f"Failed to get VM names: {e}. Assuming single-VM Vagrantfile."
@@ -214,32 +329,33 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
 
         # If no VMs found, assume single-VM Vagrantfile
         if not vm_names:
-            cls.logger.info("No VMs discovered, assuming single-VM Vagrantfile")
+            cls.logger.debug("No VMs discovered, assuming single-VM Vagrantfile")
             vm_names = [None]  # None means default/single VM
 
         try:
             # Start all VMs
             cls.logger.info(f"Starting VMs: {vm_names}")
-            cls.logger.info(f"Vagrant working directory: {tmpdir}")
-            cls.logger.info(
+            cls.logger.debug(f"Vagrant working directory: {sandbox_dir.path}")
+            cls.logger.debug(
                 f"Environment variables: INSPECT_VM_SUFFIX={vagrant_env.get('INSPECT_VM_SUFFIX')}"
             )
 
             # Log the Vagrantfile content for debugging
-            vagrantfile_path = Path(tmpdir) / "Vagrantfile"
+            vagrantfile_path = sandbox_dir.path / "Vagrantfile"
             try:
-                with open(vagrantfile_path, "r") as f:
-                    vagrantfile_content = f.read()
-                    cls.logger.debug(f"Vagrantfile contents:\n{vagrantfile_content}")
+                vagrantfile_content = await asyncio.to_thread(
+                    vagrantfile_path.read_text
+                )
+                cls.logger.debug(f"Vagrantfile contents:\n{vagrantfile_content}")
             except Exception as read_error:
                 cls.logger.error(f"Could not read Vagrantfile: {read_error}")
 
             # First check current status before trying to start
             try:
                 initial_status = await vagrant._run_vagrant_command_async(["status"])
-                cls.logger.info(f"Initial VM status: {initial_status['stdout']}")
+                cls.logger.debug(f"Initial VM status: {initial_status['stdout']}")
             except Exception as status_error:
-                cls.logger.info(
+                cls.logger.debug(
                     f"Could not get initial status (this is normal for new VMs): {status_error}"
                 )
 
@@ -316,15 +432,15 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             primary_vm = vm_names[0] if vm_names else None
 
         # Create sandbox environments for each VM
-        cls.logger.info(f"Creating sandbox environments. Primary VM: {primary_vm}")
+        cls.logger.debug(f"Creating sandbox environments. Primary VM: {primary_vm}")
         for vm_name in vm_names:
-            env = VagrantSandboxEnvironment(tmpdir_context, vagrant, vm_name)
+            env = VagrantSandboxEnvironment(sandbox_dir, vagrant, vm_name)
             cls.logger.debug(f"Created environment for VM: {vm_name}")
 
             # The primary VM becomes "default"
             if vm_name == primary_vm:
                 sandboxes["default"] = env
-                cls.logger.info(f"Set '{vm_name}' as default sandbox environment")
+                cls.logger.debug(f"Set '{vm_name}' as default sandbox environment")
 
             # Also add by VM name if it's not None (multi-VM case)
             if vm_name is not None:
@@ -357,11 +473,31 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         interrupted: bool,
     ) -> None:
         if not interrupted:
+            # Deduplicate environments - the same env may be added under multiple keys
+            # (e.g., "default" and the actual VM name)
+            seen_ids: set[int] = set()
             for env in environments.values():
                 if isinstance(env, VagrantSandboxEnvironment):
-                    await _run_in_executor(env.vagrant.destroy)
-                    await env.tmpdir_context.__aexit__(None, None, None)
-        return None
+                    env_id = id(env)
+                    if env_id in seen_ids:
+                        continue
+                    seen_ids.add(env_id)
+
+                    if not env.sandbox_dir.path.exists():
+                        cls.logger.warning(
+                            f"Sandbox directory already deleted: {env.sandbox_dir.path}"
+                        )
+                        continue
+
+                    result = await env.vagrant._run_vagrant_command_async(
+                        ["destroy", "-f"]
+                    )
+                    if result["returncode"] != 0:
+                        cls.logger.warning(
+                            f"vagrant destroy returned {result['returncode']}: {result['stderr']}"
+                        )
+
+                    await env.sandbox_dir.cleanup()
 
     @classmethod
     @override
@@ -371,31 +507,70 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         config: SandboxEnvironmentConfigType | None,
         cleanup: bool,
     ) -> None:
-        if config is None:
-            config = VagrantSandboxEnvironmentConfig()
+        cache_dir = get_sandbox_cache_dir()
+        directories = list_sandbox_directories()
 
-        if not isinstance(config, VagrantSandboxEnvironmentConfig):
-            raise ValueError("config must be a VagrantSandboxEnvironmentConfig")
+        if not directories:
+            return
 
         if cleanup:
-            cls.logger.warning("Task cleanup not implemented yet")
-            # TODO:
-            # Figure out how to clean up instances
+            cls.logger.info(f"Cleaning up {len(directories)} sandbox(es)")
+            for path in directories:
+                try:
+                    await cleanup_sandbox_with_vms(path)
+                except Exception as e:
+                    cls.logger.error(f"Failed to clean up {path}: {e}")
         else:
+            cls.logger.info(f"Sandbox cache directory: {cache_dir}")
+            for path in directories:
+                cls.logger.info(f"  {path.name}")
             cls.logger.info(
-                "Cleanup all sandbox releases with: inspect sandbox cleanup vagrant"
+                "Cleanup orphaned sandboxes with: inspect sandbox cleanup vagrant"
             )
 
     @classmethod
     @override
     async def cli_cleanup(cls, id: str | None) -> None:
         if id is None:
-            config = VagrantSandboxEnvironmentConfig()  # noqa: F841
-            vagrant = Vagrant()
-            await _run_in_executor(vagrant.destroy)
-            # TODO: is this right?
+            # Clean up all sandbox directories (destroy VMs first)
+            cache_dir = get_sandbox_cache_dir()
+            directories = list_sandbox_directories()
+            print(f"Sandbox cache directory: {cache_dir}")
+            print(f"Found {len(directories)} sandbox(es)")
+
+            if not directories:
+                print("Nothing to clean up.")
+                return
+
+            removed = 0
+            for path in directories:
+                print(f"  Cleaning up: {path.name}...", end=" ", flush=True)
+                try:
+                    await cleanup_sandbox_with_vms(path)
+                    print("done")
+                    removed += 1
+                except Exception as e:
+                    print(f"FAILED: {e}")
+                    cls.logger.error(f"Failed to clean up {path}: {e}")
+
+            print(f"Cleaned up {removed}/{len(directories)} sandboxes")
         else:
-            cls.logger.warning("Cleanup by ID not implemented")
+            # Clean up specific sandbox by ID (directory name)
+            cache_dir = get_sandbox_cache_dir()
+            sandbox_path = cache_dir / id
+            if sandbox_path.exists():
+                print(f"Cleaning up sandbox: {id}...", end=" ", flush=True)
+                try:
+                    await cleanup_sandbox_with_vms(sandbox_path)
+                    print("done")
+                except Exception as e:
+                    print(f"FAILED: {e}")
+                    cls.logger.error(f"Failed to clean up {sandbox_path}: {e}")
+            else:
+                print(f"Sandbox not found: {id}")
+                print(f"Available sandboxes in {cache_dir}:")
+                for path in list_sandbox_directories():
+                    print(f"  - {path.name}")
 
     @classmethod
     @override
@@ -448,8 +623,14 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                 result["returncode"], command, result["stdout"]
             )
 
+    @overload
+    async def read_file(self, file: str, text: Literal[True] = True) -> str: ...
+
+    @overload
+    async def read_file(self, file: str, text: Literal[False]) -> bytes: ...
+
     @override
-    async def read_file(self, file: str, text: bool = True) -> str | bytes:  # type: ignore
+    async def read_file(self, file: str, text: bool = True) -> str | bytes:
         command = f"cat {file}"
         result = await self.vagrant.ssh(vm_name=self.vm_name, command=command)
         if result["returncode"] != 0:
@@ -457,8 +638,9 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                 result["returncode"], command, result["stdout"]
             )
 
-        return result["stdout"]
-        # type-ignore is because Mypy complains that this override doesn't implement bytes return
+        if text:
+            return result["stdout"]
+        return result["stdout"].encode("utf-8")
 
     @override
     async def connection(self, *, user: str | None = None) -> SandboxConnection:
@@ -474,15 +656,8 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
            NotImplementedError: For sandboxes that don't provide connections
            ConnectionError: If sandbox is not currently running.
         """
-        """
-        Returns a connection to the sandbox.
-
-        Raises:
-           NotImplementedError: For sandboxes that don't provide connections
-           ConnectionError: If sandbox is not currently running.
-        """
-        tmpdir = self.tmpdir_context.__str__()
+        sandbox_path = str(self.sandbox_dir)
         return SandboxConnection(
             type="vagrant",
-            command=f"VAGRANT_CWD={tmpdir} vagrant ssh",
+            command=f"VAGRANT_CWD={sandbox_path} vagrant ssh",
         )

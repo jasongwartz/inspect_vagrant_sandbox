@@ -1,6 +1,12 @@
 Vagrant.configure("2") do |config|
   is_arm = `uname -m`.strip == "arm64"
-  config.vm.box = is_arm ? "perk/ubuntu-2204-arm64" : "generic/ubuntu2204"
+  # Get unique suffix from environment variable to avoid VM name conflicts
+  vm_suffix = ENV['INSPECT_VM_SUFFIX'] || ''
+
+  # Define VM with unique name for parallel test execution
+  config.vm.define "default#{vm_suffix}" do |vm|
+    vm.vm.box = is_arm ? "perk/ubuntu-2204-arm64" : "generic/ubuntu2204"
+  end
 
   config.vm.provider "qemu" do |qe|
     qe.ssh_auto_correct = true

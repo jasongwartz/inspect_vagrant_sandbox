@@ -1,6 +1,10 @@
 Vagrant.configure("2") do |config|
-    is_arm = `uname -m`.strip == "arm64"
-    config.vm.box = is_arm ? "perk/ubuntu-2204-arm64" : "generic/ubuntu2204"
+  # Get unique suffix from environment variable to avoid VM name conflicts
+  vm_suffix = ENV['INSPECT_VM_SUFFIX'] || ''
+  is_arm = `uname -m`.strip == "arm64"
+
+  config.vm.define "default#{vm_suffix}" do |vm|
+    vm.vm.box = is_arm ? "perk/ubuntu-2204-arm64" : "generic/ubuntu2204"
 
     config.vm.provider "qemu" do |qe|
         # Default is:
@@ -9,9 +13,9 @@ Vagrant.configure("2") do |config|
         # qe.machine = "virt,accel=hvf,highmem=off"
       qe.ssh_auto_correct = true
     end
-    
+
     # Install Docker using official installation script
-    config.vm.provision "shell", inline: <<-SHELL
+    vm.vm.provision "shell", inline: <<-SHELL
       # Add Docker's official GPG key:
       sudo apt-get update
       sudo apt-get install ca-certificates curl
@@ -40,3 +44,4 @@ Vagrant.configure("2") do |config|
       docker compose version
     SHELL
   end
+end
