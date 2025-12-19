@@ -14,7 +14,7 @@ async def test_sandbox_up_down():
         "test1",
         VagrantSandboxEnvironmentConfig(
             vagrantfile_path=(os.path.dirname(os.path.abspath(__file__)))
-            + "/Vagrantfile"
+            + "/Vagrantfile.basic"
         ),
         {},
     )
@@ -38,7 +38,7 @@ async def test_readfile_writefile():
         "test1",
         VagrantSandboxEnvironmentConfig(
             vagrantfile_path=(os.path.dirname(os.path.abspath(__file__)))
-            + "/Vagrantfile"
+            + "/Vagrantfile.basic"
         ),
         {},
     )
