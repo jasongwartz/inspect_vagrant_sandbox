@@ -28,7 +28,10 @@ def mock_vagrant():
 def mock_sandbox_dir():
     """Create a mock SandboxDirectory instance."""
     mock_dir = Mock(spec=SandboxDirectory)
-    mock_dir.path = Path("/tmp/test_vagrant")
+    # Create a mock path that returns True for exists()
+    mock_path = Mock()
+    mock_path.exists = Mock(return_value=True)
+    mock_dir.path = mock_path
     mock_dir.cleanup = AsyncMock(return_value=None)
     return mock_dir
 
@@ -61,18 +64,23 @@ def mock_subprocess_patches():
 @pytest.fixture
 def mock_sandbox_patches():
     """Create patches for SandboxDirectory operations."""
+    mock_sandbox = Mock(spec=SandboxDirectory)
+    # Create a mock path that returns True for exists()
+    mock_path = Mock()
+    mock_path.exists = Mock(return_value=True)
+    mock_path.__truediv__ = Mock(return_value=mock_path)  # For path / "Vagrantfile"
+    mock_path.as_posix = Mock(return_value="/tmp/test_vagrant/Vagrantfile")
+    mock_sandbox.path = mock_path
+    mock_sandbox.cleanup = AsyncMock(return_value=None)
+
     with (
         patch(
-            "vagrantsandbox.vagrant_sandbox_provider.SandboxDirectory.create"
+            "vagrantsandbox.vagrant_sandbox_provider.SandboxDirectory.create",
+            new_callable=AsyncMock,
+            return_value=mock_sandbox,
         ) as mock_create,
-        patch("asyncio.to_thread") as mock_to_thread,
+        patch("asyncio.to_thread", new_callable=AsyncMock) as mock_to_thread,
     ):
-        mock_sandbox = Mock(spec=SandboxDirectory)
-        mock_sandbox.path = Path("/tmp/test_vagrant")
-        mock_sandbox.cleanup = AsyncMock(return_value=None)
-        mock_create.return_value = mock_sandbox
-        mock_to_thread.return_value = None
-
         yield {
             "create": mock_create,
             "to_thread": mock_to_thread,
@@ -225,6 +233,12 @@ class TestVagrantSandboxEnvironment:
         self, mock_vagrant, mock_sandbox_dir, mock_subprocess_patches
     ):
         """Test successful sample cleanup."""
+        # Mock the path.exists() to return True so cleanup proceeds
+        mock_sandbox_dir.path.exists = Mock(return_value=True)
+        mock_vagrant._run_vagrant_command_async = AsyncMock(
+            return_value={"returncode": 0, "stdout": "", "stderr": ""}
+        )
+
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
         environments = {"default": env}
 
@@ -232,7 +246,7 @@ class TestVagrantSandboxEnvironment:
             "test_task", None, environments, interrupted=False
         )
 
-        mock_vagrant.destroy.assert_called_once()
+        mock_vagrant._run_vagrant_command_async.assert_called_once_with(["destroy", "-f"])
         mock_sandbox_dir.cleanup.assert_called_once()
 
     @pytest.mark.unit
@@ -372,12 +386,21 @@ class TestVagrantSandboxEnvironment:
     @pytest.mark.asyncio
     async def test_cli_cleanup_no_id(self):
         """Test CLI cleanup without specific ID."""
-        with patch(
-            "vagrantsandbox.vagrant_sandbox_provider.cleanup_all_sandboxes_with_vms"
-        ) as mock_cleanup:
-            mock_cleanup.return_value = 0
+        # Mock list_sandbox_directories to return some directories
+        mock_dirs = [Path("/mock/sandbox1"), Path("/mock/sandbox2")]
+        with (
+            patch(
+                "vagrantsandbox.vagrant_sandbox_provider.list_sandbox_directories",
+                return_value=mock_dirs,
+            ),
+            patch(
+                "vagrantsandbox.vagrant_sandbox_provider.cleanup_sandbox_with_vms",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_cleanup,
+        ):
             await VagrantSandboxEnvironment.cli_cleanup(None)
-            mock_cleanup.assert_called_once()
+            assert mock_cleanup.call_count == 2
 
 
 class TestRunInExecutor:

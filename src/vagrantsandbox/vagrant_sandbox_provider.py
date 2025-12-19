@@ -344,11 +344,9 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             (sandbox_dir.path / "Vagrantfile").as_posix(),
         )
 
-        unique_suffix = (
-            f"-{sample_id[:8]}"
-            if sample_id != "unknown"
-            else f"-{uuid.uuid4().hex[:8]}"
-        )
+        # Use the sandbox directory name as the unique suffix - it already contains
+        # both the sample_id prefix and a UUID, making it truly unique per test instance
+        unique_suffix = f"-{sandbox_dir.path.name}"
         cls.logger.info(f"Using unique VM suffix: {unique_suffix}")
         cls.logger.info(f"Sandbox directory: {sandbox_dir.path}")
 
@@ -513,9 +511,35 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         interrupted: bool,
     ) -> None:
         if not interrupted:
+            # Deduplicate environments - the same env may be added under multiple keys
+            # (e.g., "default" and the actual VM name)
+            seen_ids: set[int] = set()
             for env in environments.values():
                 if isinstance(env, VagrantSandboxEnvironment):
-                    await _run_in_executor(env.vagrant.destroy)
+                    env_id = id(env)
+                    if env_id in seen_ids:
+                        continue
+                    seen_ids.add(env_id)
+
+                    # Check if sandbox directory still exists before cleanup
+                    if not env.sandbox_dir.path.exists():
+                        cls.logger.warning(
+                            f"Sandbox directory already deleted: {env.sandbox_dir.path}"
+                        )
+                        continue
+
+                    # Use async vagrant command to avoid cwd issues with subprocess
+                    try:
+                        result = await env.vagrant._run_vagrant_command_async(
+                            ["destroy", "-f"]
+                        )
+                        if result["returncode"] != 0:
+                            cls.logger.warning(
+                                f"vagrant destroy returned {result['returncode']}: {result['stderr']}"
+                            )
+                    except Exception as e:
+                        cls.logger.warning(f"Failed to destroy VM: {e}")
+
                     await env.sandbox_dir.cleanup()
         return None
 
@@ -527,24 +551,16 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         config: SandboxEnvironmentConfigType | None,
         cleanup: bool,
     ) -> None:
-        if config is None:
-            config = VagrantSandboxEnvironmentConfig()
-
-        if not isinstance(config, VagrantSandboxEnvironmentConfig):
-            raise ValueError("config must be a VagrantSandboxEnvironmentConfig")
-
-        if cleanup:
-            cache_dir = get_sandbox_cache_dir()
-            cls.logger.info(f"Cleaning up all sandboxes in: {cache_dir}")
-            removed = await cleanup_all_sandboxes_with_vms()
-            cls.logger.info(f"Cleaned up {removed} sandboxes (VMs destroyed)")
-        else:
-            cache_dir = get_sandbox_cache_dir()
-            directories = list_sandbox_directories()
+        # NOTE: We don't clean up ALL sandboxes here because other tasks may be
+        # running in parallel. Each sample's sandboxes are cleaned up in sample_cleanup.
+        # Use `inspect sandbox cleanup vagrant` for manual cleanup of orphaned sandboxes.
+        cache_dir = get_sandbox_cache_dir()
+        directories = list_sandbox_directories()
+        if directories:
             cls.logger.info(
                 f"Sandbox directories stored in: {cache_dir}\n"
                 f"Found {len(directories)} sandbox(es)\n"
-                "Cleanup all sandbox releases with: inspect sandbox cleanup vagrant"
+                "Cleanup orphaned sandboxes with: inspect sandbox cleanup vagrant"
             )
 
     @classmethod
@@ -553,21 +569,40 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         if id is None:
             # Clean up all sandbox directories (destroy VMs first)
             cache_dir = get_sandbox_cache_dir()
-            cls.logger.info(f"Cleaning up all sandboxes in: {cache_dir}")
-            removed = await cleanup_all_sandboxes_with_vms()
-            cls.logger.info(f"Removed {removed} sandboxes")
+            directories = list_sandbox_directories()
+            print(f"Sandbox cache directory: {cache_dir}")
+            print(f"Found {len(directories)} sandbox(es)")
+
+            if not directories:
+                print("Nothing to clean up.")
+                return
+
+            removed = 0
+            for path in directories:
+                print(f"  Cleaning up: {path.name}...", end=" ", flush=True)
+                if await cleanup_sandbox_with_vms(path):
+                    print("done")
+                    removed += 1
+                else:
+                    print("FAILED")
+
+            print(f"Cleaned up {removed}/{len(directories)} sandboxes")
         else:
             # Clean up specific sandbox by ID (directory name)
             cache_dir = get_sandbox_cache_dir()
             sandbox_path = cache_dir / id
             if sandbox_path.exists():
+                print(f"Cleaning up sandbox: {id}...", end=" ", flush=True)
                 success = await cleanup_sandbox_with_vms(sandbox_path)
                 if success:
-                    cls.logger.info(f"Cleaned up sandbox: {id}")
+                    print("done")
                 else:
-                    cls.logger.error(f"Failed to clean up sandbox: {id}")
+                    print("FAILED")
             else:
-                cls.logger.warning(f"Sandbox not found: {id}")
+                print(f"Sandbox not found: {id}")
+                print(f"Available sandboxes in {cache_dir}:")
+                for path in list_sandbox_directories():
+                    print(f"  - {path.name}")
 
     @classmethod
     @override
