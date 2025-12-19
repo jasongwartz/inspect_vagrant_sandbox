@@ -3,10 +3,12 @@ import subprocess
 from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
+from pathlib import Path
 from vagrantsandbox.vagrant_sandbox_provider import (
     Vagrant,
     VagrantSandboxEnvironment,
     VagrantSandboxEnvironmentConfig,
+    SandboxDirectory,
     _run_in_executor,
 )
 
@@ -23,12 +25,12 @@ def mock_vagrant():
 
 
 @pytest.fixture
-def mock_tmpdir_context():
-    """Create a mock temporary directory context."""
-    context = AsyncMock()
-    context.__aenter__ = AsyncMock(return_value="/tmp/test_vagrant")
-    context.__aexit__ = AsyncMock(return_value=None)
-    return context
+def mock_sandbox_dir():
+    """Create a mock SandboxDirectory instance."""
+    mock_dir = Mock(spec=SandboxDirectory)
+    mock_dir.path = Path("/tmp/test_vagrant")
+    mock_dir.cleanup = AsyncMock(return_value=None)
+    return mock_dir
 
 
 @pytest.fixture
@@ -57,22 +59,24 @@ def mock_subprocess_patches():
 
 
 @pytest.fixture
-def mock_aiofiles_patches():
-    """Create patches for aiofiles operations."""
+def mock_sandbox_patches():
+    """Create patches for SandboxDirectory operations."""
     with (
-        patch("aiofiles.tempfile.TemporaryDirectory") as mock_tempdir,
+        patch(
+            "vagrantsandbox.vagrant_sandbox_provider.SandboxDirectory.create"
+        ) as mock_create,
         patch("asyncio.to_thread") as mock_to_thread,
     ):
-        mock_tempdir_context = AsyncMock()
-        mock_tempdir_context.__aenter__ = AsyncMock(return_value="/tmp/test_vagrant")
-        mock_tempdir_context.__aexit__ = AsyncMock(return_value=None)
-        mock_tempdir.return_value = mock_tempdir_context
+        mock_sandbox = Mock(spec=SandboxDirectory)
+        mock_sandbox.path = Path("/tmp/test_vagrant")
+        mock_sandbox.cleanup = AsyncMock(return_value=None)
+        mock_create.return_value = mock_sandbox
         mock_to_thread.return_value = None
 
         yield {
-            "tempdir": mock_tempdir,
+            "create": mock_create,
             "to_thread": mock_to_thread,
-            "context": mock_tempdir_context,
+            "sandbox": mock_sandbox,
         }
 
 
@@ -166,16 +170,16 @@ class TestVagrantSandboxEnvironment:
     """Test the VagrantSandboxEnvironment class."""
 
     @pytest.mark.unit
-    def test_init(self, mock_tmpdir_context, mock_vagrant):
+    def test_init(self, mock_sandbox_dir, mock_vagrant):
         """Test VagrantSandboxEnvironment initialization."""
-        env = VagrantSandboxEnvironment(mock_tmpdir_context, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
         assert env.vagrant == mock_vagrant
-        assert env.tmpdir_context == mock_tmpdir_context
+        assert env.sandbox_dir == mock_sandbox_dir
 
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_sample_init_success(
-        self, sample_config, mock_subprocess_patches, mock_aiofiles_patches
+        self, sample_config, mock_subprocess_patches, mock_sandbox_patches
     ):
         """Test successful sample initialization."""
         with patch(
@@ -193,12 +197,12 @@ class TestVagrantSandboxEnvironment:
 
             assert "default" in result
             assert isinstance(result["default"], VagrantSandboxEnvironment)
-            mock_aiofiles_patches["to_thread"].assert_called()
+            mock_sandbox_patches["to_thread"].assert_called()
 
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_sample_init_vagrant_up_failure(
-        self, sample_config, mock_aiofiles_patches
+        self, sample_config, mock_sandbox_patches
     ):
         """Test sample initialization when vagrant up fails."""
         with patch(
@@ -218,10 +222,10 @@ class TestVagrantSandboxEnvironment:
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_sample_cleanup_success(
-        self, mock_vagrant, mock_tmpdir_context, mock_subprocess_patches
+        self, mock_vagrant, mock_sandbox_dir, mock_subprocess_patches
     ):
         """Test successful sample cleanup."""
-        env = VagrantSandboxEnvironment(mock_tmpdir_context, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
         environments = {"default": env}
 
         await VagrantSandboxEnvironment.sample_cleanup(
@@ -229,13 +233,13 @@ class TestVagrantSandboxEnvironment:
         )
 
         mock_vagrant.destroy.assert_called_once()
-        mock_tmpdir_context.__aexit__.assert_called_once()
+        mock_sandbox_dir.cleanup.assert_called_once()
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_sample_cleanup_interrupted(self, mock_vagrant, mock_tmpdir_context):
+    async def test_sample_cleanup_interrupted(self, mock_vagrant, mock_sandbox_dir):
         """Test cleanup when interrupted (should not destroy VM)."""
-        env = VagrantSandboxEnvironment(mock_tmpdir_context, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
         environments = {"default": env}
 
         with patch("vagrant.subprocess.run") as mock_subprocess_run:
@@ -244,13 +248,13 @@ class TestVagrantSandboxEnvironment:
             )
 
             mock_subprocess_run.assert_not_called()
-            mock_tmpdir_context.__aexit__.assert_not_called()
+            mock_sandbox_dir.cleanup.assert_not_called()
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_exec_success(self, mock_vagrant, mock_tmpdir_context):
+    async def test_exec_success(self, mock_vagrant, mock_sandbox_dir):
         """Test successful command execution."""
-        env = VagrantSandboxEnvironment(mock_tmpdir_context, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
         mock_vagrant.ssh.return_value = {
             "returncode": 0,
             "stdout": "command output",
@@ -269,9 +273,9 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_exec_failure(self, mock_vagrant, mock_tmpdir_context):
+    async def test_exec_failure(self, mock_vagrant, mock_sandbox_dir):
         """Test failed command execution."""
-        env = VagrantSandboxEnvironment(mock_tmpdir_context, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
         mock_vagrant.ssh.return_value = {
             "returncode": 1,
             "stdout": "",
@@ -286,9 +290,9 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_write_file_success(self, mock_vagrant, mock_tmpdir_context):
+    async def test_write_file_success(self, mock_vagrant, mock_sandbox_dir):
         """Test successful file writing."""
-        env = VagrantSandboxEnvironment(mock_tmpdir_context, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
         mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
 
         await env.write_file("/tmp/test.txt", "test content")
@@ -299,9 +303,9 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_write_file_failure(self, mock_vagrant, mock_tmpdir_context):
+    async def test_write_file_failure(self, mock_vagrant, mock_sandbox_dir):
         """Test file writing failure."""
-        env = VagrantSandboxEnvironment(mock_tmpdir_context, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
         mock_vagrant.ssh.return_value = {
             "returncode": 1,
             "stdout": "",
@@ -313,9 +317,9 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_write_file_bytes_content(self, mock_vagrant, mock_tmpdir_context):
+    async def test_write_file_bytes_content(self, mock_vagrant, mock_sandbox_dir):
         """Test writing bytes content to file."""
-        env = VagrantSandboxEnvironment(mock_tmpdir_context, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
         mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
 
         await env.write_file("/tmp/test.txt", b"test content")
@@ -324,9 +328,9 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_read_file_success(self, mock_vagrant, mock_tmpdir_context):
+    async def test_read_file_success(self, mock_vagrant, mock_sandbox_dir):
         """Test successful file reading."""
-        env = VagrantSandboxEnvironment(mock_tmpdir_context, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
         mock_vagrant.ssh.return_value = {
             "returncode": 0,
             "stdout": "file content",
@@ -342,9 +346,9 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_read_file_failure(self, mock_vagrant, mock_tmpdir_context):
+    async def test_read_file_failure(self, mock_vagrant, mock_sandbox_dir):
         """Test file reading failure."""
-        env = VagrantSandboxEnvironment(mock_tmpdir_context, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
         mock_vagrant.ssh.return_value = {
             "returncode": 1,
             "stdout": "",
@@ -356,9 +360,9 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_connection(self, mock_vagrant, mock_tmpdir_context):
+    async def test_connection(self, mock_vagrant, mock_sandbox_dir):
         """Test connection method."""
-        env = VagrantSandboxEnvironment(mock_tmpdir_context, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
         connection = await env.connection()
 
         assert connection.type == "vagrant"
@@ -366,10 +370,14 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_cli_cleanup_no_id(self, mock_subprocess_patches):
+    async def test_cli_cleanup_no_id(self):
         """Test CLI cleanup without specific ID."""
-        await VagrantSandboxEnvironment.cli_cleanup(None)
-        mock_subprocess_patches["check_call"].assert_called()
+        with patch(
+            "vagrantsandbox.vagrant_sandbox_provider.cleanup_all_sandbox_directories"
+        ) as mock_cleanup:
+            mock_cleanup.return_value = 0
+            await VagrantSandboxEnvironment.cli_cleanup(None)
+            mock_cleanup.assert_called_once()
 
 
 class TestRunInExecutor:
@@ -426,7 +434,7 @@ class TestVagrantSandboxEnvironmentConfig:
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_sample_lifecycle_unit(
-    sample_config, mock_subprocess_patches, mock_aiofiles_patches
+    sample_config, mock_subprocess_patches, mock_sandbox_patches
 ):
     """Unit test for the complete sample lifecycle with mocking."""
     with patch(
@@ -464,4 +472,4 @@ async def test_sample_lifecycle_unit(
         )
 
         # Verify cleanup was called
-        mock_aiofiles_patches["context"].__aexit__.assert_called_once()
+        mock_sandbox_patches["sandbox"].cleanup.assert_called_once()

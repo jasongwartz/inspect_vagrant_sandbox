@@ -33,7 +33,7 @@ def get_sandbox_cache_dir() -> Path:
 
 class SandboxDirectory:
     """
-    Context manager for sandbox directories stored in user cache.
+    Manages sandbox directories stored in user cache.
 
     Unlike TemporaryDirectory, these persist until explicitly cleaned up,
     making them easier to locate and manage.
@@ -41,42 +41,39 @@ class SandboxDirectory:
 
     logger = getLogger(__name__)
 
-    def __init__(self, sample_id: str | None = None):
-        self.sample_id = sample_id
-        self._path: Path | None = None
+    def __init__(self, path: Path):
+        self.path = path
 
-    async def __aenter__(self) -> str:
-        """Create and return the sandbox directory path."""
+    @classmethod
+    async def create(cls, sample_id: str | None = None) -> "SandboxDirectory":
+        """Create a new sandbox directory in user cache."""
         base_dir = get_sandbox_cache_dir()
         await asyncio.to_thread(base_dir.mkdir, parents=True, exist_ok=True)
 
         # Create unique subdirectory name
         short_uuid = uuid.uuid4().hex[:8]
-        if self.sample_id and self.sample_id != "unknown":
-            subdir_name = f"{self.sample_id[:8]}-{short_uuid}"
+        if sample_id and sample_id != "unknown":
+            subdir_name = f"{sample_id[:8]}-{short_uuid}"
         else:
             subdir_name = short_uuid
 
-        self._path = base_dir / subdir_name
-        await asyncio.to_thread(self._path.mkdir, exist_ok=True)
+        path = base_dir / subdir_name
+        await asyncio.to_thread(path.mkdir, exist_ok=True)
 
-        self.logger.debug(f"Created sandbox directory: {self._path}")
-        return str(self._path)
+        cls.logger.debug(f"Created sandbox directory: {path}")
+        return cls(path)
 
-    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        """Clean up the sandbox directory."""
-        if self._path and self._path.exists():
+    async def cleanup(self) -> None:
+        """Remove the sandbox directory."""
+        if self.path.exists():
             try:
-                await asyncio.to_thread(shutil.rmtree, self._path)
-                self.logger.debug(f"Cleaned up sandbox directory: {self._path}")
+                await asyncio.to_thread(shutil.rmtree, self.path)
+                self.logger.debug(f"Cleaned up sandbox directory: {self.path}")
             except Exception as e:
-                self.logger.warning(
-                    f"Failed to clean up sandbox directory {self._path}: {e}"
-                )
+                self.logger.warning(f"Failed to clean up {self.path}: {e}")
 
     def __str__(self) -> str:
-        """Return the path as a string."""
-        return str(self._path) if self._path else ""
+        return str(self.path)
 
 
 def list_sandbox_directories() -> list[Path]:
@@ -278,13 +275,12 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         sample_id = metadata.get("sample_id", "unknown")
 
         # Use SandboxDirectory for user-local cache storage (easier to locate/cleanup)
-        sandbox_dir = SandboxDirectory(sample_id=sample_id)
-        sandbox_path = await sandbox_dir.__aenter__()
+        sandbox_dir = await SandboxDirectory.create(sample_id=sample_id)
 
         await asyncio.to_thread(
             shutil.copy2,
             config.vagrantfile_path,
-            (Path(sandbox_path) / "Vagrantfile").as_posix(),
+            (sandbox_dir.path / "Vagrantfile").as_posix(),
         )
 
         unique_suffix = (
@@ -293,13 +289,13 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             else f"-{uuid.uuid4().hex[:8]}"
         )
         cls.logger.info(f"Using unique VM suffix: {unique_suffix}")
-        cls.logger.info(f"Sandbox directory: {sandbox_path}")
+        cls.logger.info(f"Sandbox directory: {sandbox_dir.path}")
 
         # Set environment variable for Vagrantfile to use
         vagrant_env = os.environ.copy()
         vagrant_env["INSPECT_VM_SUFFIX"] = unique_suffix
 
-        vagrant = Vagrant(root=sandbox_path, env=vagrant_env)
+        vagrant = Vagrant(root=str(sandbox_dir), env=vagrant_env)
 
         # Get available VMs before starting them
         try:
@@ -319,13 +315,13 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         try:
             # Start all VMs
             cls.logger.info(f"Starting VMs: {vm_names}")
-            cls.logger.info(f"Vagrant working directory: {sandbox_path}")
+            cls.logger.info(f"Vagrant working directory: {sandbox_dir.path}")
             cls.logger.info(
                 f"Environment variables: INSPECT_VM_SUFFIX={vagrant_env.get('INSPECT_VM_SUFFIX')}"
             )
 
             # Log the Vagrantfile content for debugging
-            vagrantfile_path = Path(sandbox_path) / "Vagrantfile"
+            vagrantfile_path = sandbox_dir.path / "Vagrantfile"
             try:
                 with open(vagrantfile_path, "r") as f:
                     vagrantfile_content = f.read()
@@ -459,7 +455,7 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             for env in environments.values():
                 if isinstance(env, VagrantSandboxEnvironment):
                     await _run_in_executor(env.vagrant.destroy)
-                    await env.sandbox_dir.__aexit__(None, None, None)
+                    await env.sandbox_dir.cleanup()
         return None
 
     @classmethod
