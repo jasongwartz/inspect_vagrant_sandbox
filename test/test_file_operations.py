@@ -19,7 +19,7 @@ from vagrantsandbox.vagrant_sandbox_provider import (
 
 def get_test_vagrantfile():
     """Get path to test Vagrantfile."""
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "Vagrantfile")
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "Vagrantfile.basic")
 
 
 def get_basic_vagrantfile():

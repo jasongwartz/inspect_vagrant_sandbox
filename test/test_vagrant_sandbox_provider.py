@@ -36,7 +36,7 @@ def mock_sandbox_dir():
 @pytest.fixture
 def sample_config():
     """Create a sample configuration."""
-    return VagrantSandboxEnvironmentConfig(vagrantfile_path="/test/Vagrantfile")
+    return VagrantSandboxEnvironmentConfig(vagrantfile_path="/test/Vagrantfile.basic")
 
 
 @pytest.fixture
