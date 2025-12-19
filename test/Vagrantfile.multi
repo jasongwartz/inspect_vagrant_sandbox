@@ -1,20 +1,21 @@
 Vagrant.configure("2") do |config|
-  # Shared configuration from working Vagrantfile.basic
+  is_arm = `uname -m`.strip == "arm64"
+  box = is_arm ? "perk/ubuntu-2204-arm64" : "generic/ubuntu2204"
+
   config.ssh.insert_key = false
   config.vm.synced_folder ".", "/vagrant", disabled: true
 
-  # Get unique suffix from environment variable to avoid VM name conflicts
-  vm_suffix = ENV['INSPECT_VM_SUFFIX'] || ''
-
-  # Target system
-  config.vm.define "target#{vm_suffix}" do |target|
-    target.vm.box = "generic/ubuntu2204" #"perk/ubuntu-2204-arm64"
+  config.vm.provider "qemu" do |qe|
+    qe.ssh_auto_correct = true
   end
 
-  # Attacker system (primary - where agent runs)
+  vm_suffix = ENV['INSPECT_VM_SUFFIX'] || ''
+
+  config.vm.define "target#{vm_suffix}" do |target|
+    target.vm.box = box
+  end
+
   config.vm.define "attacker#{vm_suffix}", primary: true do |attacker|
-    attacker.vm.box = "generic/ubuntu2204" #"perk/ubuntu-2204-arm64"
-    # Disable provisioning for now to isolate VM startup issues
-    # attacker.vm.provision "shell", inline: "apt-get update && apt-get install -y nmap"
+    attacker.vm.box = box
   end
 end
