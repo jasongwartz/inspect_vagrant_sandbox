@@ -100,6 +100,14 @@ def vagrant_example() -> Task:
     )
 ```
 
+### Testing your Vagrantfile and Sandbox
+
+VM setups can be complex and difficult to debug, especially if your Vagrantfile starts up multiple VMs.
+
+When developing the sandbox, you can use `vagrant up` to create the VM(s), and `vagrant destroy` when finished. Review [the Vagrant CLI documentation](https://developer.hashicorp.com/vagrant/docs/cli) for more information.
+
+If you want to test your full eval implementation to make sure it's solvable, you might want to use [Inspect's "Human Agent" solver](https://inspect.aisi.org.uk/human-agent.html). Run your eval as normal (i.e. with `inspect eval ...`), and add `--solver human_cli` to the command; this will bootstrap the sandbox as defined in the eval, and then print out a `vagrant ssh` command you can use to connect into the sandbox.
+
 ## Developing the Sandbox Provider
 
 First, make sure to familiarise yourself with the [Inspect sandbox provider extension API](https://inspect.aisi.org.uk/extensions.html#sec-sandbox-environment-extensions).
