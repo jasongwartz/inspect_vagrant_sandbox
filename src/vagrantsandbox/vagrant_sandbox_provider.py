@@ -6,7 +6,17 @@ import shlex
 import shutil
 import subprocess
 import uuid
-from typing import Any, Callable, Coroutine, Literal, TypeVar, TypedDict, assert_never, overload, override
+from typing import (
+    Any,
+    Callable,
+    Coroutine,
+    Literal,
+    TypeVar,
+    TypedDict,
+    assert_never,
+    overload,
+    override,
+)
 from logging import getLogger
 from vagrant import Vagrant as BaseVagrant
 from pydantic import BaseModel, Field
@@ -333,7 +343,9 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             # Log the Vagrantfile content for debugging
             vagrantfile_path = sandbox_dir.path / "Vagrantfile"
             try:
-                vagrantfile_content = await asyncio.to_thread(vagrantfile_path.read_text)
+                vagrantfile_content = await asyncio.to_thread(
+                    vagrantfile_path.read_text
+                )
                 cls.logger.debug(f"Vagrantfile contents:\n{vagrantfile_content}")
             except Exception as read_error:
                 cls.logger.error(f"Could not read Vagrantfile: {read_error}")
