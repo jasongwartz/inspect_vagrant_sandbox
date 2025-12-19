@@ -1,6 +1,12 @@
 Vagrant.configure("2") do |config|
-    # Ubuntu base image ("box") for arm64 macOS devices
-    config.vm.box = "generic/ubuntu2204"
+  # Get unique suffix from environment variable to avoid VM name conflicts
+  vm_suffix = ENV['INSPECT_VM_SUFFIX'] || ''
+
+  # Define VM with unique name for parallel test execution
+  config.vm.define "default#{vm_suffix}" do |vm|
+    # Ubuntu base image ("box")
+    vm.vm.box = "generic/ubuntu2204"
+  end
 
   # Speed up SSH
   config.ssh.insert_key = false
