@@ -94,7 +94,7 @@ class MockAsyncProcess:
         self._stdout = stdout.encode() if isinstance(stdout, str) else stdout
         self._stderr = stderr.encode() if isinstance(stderr, str) else stderr
 
-    async def communicate(self):
+    async def communicate(self, input=None):
         return self._stdout, self._stderr
 
 
@@ -263,7 +263,7 @@ class TestVagrantSandboxEnvironment:
         assert result.returncode == 0
         assert result.stdout == "command output"
         assert result.stderr == ""
-        mock_vagrant.ssh.assert_called_once_with(vm_name=None, command="ls -la")
+        mock_vagrant.ssh.assert_called_once_with(vm_name=None, command="ls -la", input=None)
 
     @pytest.mark.unit
     @pytest.mark.asyncio
