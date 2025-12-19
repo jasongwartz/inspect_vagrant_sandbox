@@ -458,6 +458,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },
     { name = "inspect-ai" },
+    { name = "platformdirs" },
     { name = "python-vagrant" },
 ]
 
@@ -476,6 +477,7 @@ dev = [
 requires-dist = [
     { name = "aiofiles", specifier = ">=24.1.0" },
     { name = "inspect-ai", specifier = ">=0.3.123" },
+    { name = "platformdirs", specifier = ">=4.0.0" },
     { name = "python-vagrant", specifier = ">=1.0.0" },
 ]
 
@@ -533,6 +535,38 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/00/2a/e867e8531cf3e36b41201936b7fa7ba7b5702dbef42922193f05c8976cd6/jmespath-1.0.1.tar.gz", hash = "sha256:90261b206d6defd58fdd5e85f478bf633a2901798906be2ad389150c5c60edbe", size = 25843, upload-time = "2022-06-17T18:00:12.224Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/31/b4/b9b800c45527aadd64d5b442f9b932b00648617eb5d63d2c7a6587b7cafc/jmespath-1.0.1-py3-none-any.whl", hash = "sha256:02e2e4cc71b5bcab88332eebf907519190dd9e6e82107fa7f83b1003a6252980", size = 20256, upload-time = "2022-06-17T18:00:10.251Z" },
+]
+
+[[package]]
+name = "json-stream"
+version = "2.4.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "json-stream-rs-tokenizer" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/bb/3a/18dc5aaf006e19632bb0cb3d14854ff7c8b84d18a65fda10f09a41495f44/json_stream-2.4.1.tar.gz", hash = "sha256:9491041faae7ea05fdd3d40768b8f9ee7ea4e40b168f27240b028a8bb0a1a3c2", size = 35170, upload-time = "2025-11-08T10:26:57.175Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/71/42/754adf29fd19e81024dc507bcf42d4184c89210c3db0f1c866f4b658214c/json_stream-2.4.1-py3-none-any.whl", hash = "sha256:d31dc2dbc8586c21a6e71e4bf4868133f86c53fc7fd62eb482005db579a6e3e6", size = 35009, upload-time = "2025-11-08T10:26:55.83Z" },
+]
+
+[[package]]
+name = "json-stream-rs-tokenizer"
+version = "0.4.32"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/60/d0/1d4f41f98b77f9f475819b112372eccf1b6821f46da5fca732845c845850/json_stream_rs_tokenizer-0.4.32.tar.gz", hash = "sha256:dbc26f496e54004e5b8f708a5c9d6ae0fa4d8e97df0823a15a13538464e5a1a9", size = 34912, upload-time = "2025-11-10T21:13:46.854Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/74/fd/e04a8e1251cb91b619910fc6306df7b4e96962e2d7271730b957030ac5da/json_stream_rs_tokenizer-0.4.32-cp313-cp313-macosx_10_13_x86_64.whl", hash = "sha256:d871712a1690ec303da1fbe3e5ebc082bdef03ffc0c8ada5cf8e15a6a3c4c9a0", size = 300671, upload-time = "2025-11-10T21:13:06.352Z" },
+    { url = "https://files.pythonhosted.org/packages/6c/0f/5a57f78e3da0540f6dfb278c30a8b22d5a0c207afb703818e6d503bdf865/json_stream_rs_tokenizer-0.4.32-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:b563ebbed598553754f3713756250fed3f9407e867540f864e1af19ac1037062", size = 291499, upload-time = "2025-11-10T21:13:07.836Z" },
+    { url = "https://files.pythonhosted.org/packages/b5/68/ae289642185efc1a50ba4e2c7aa0ea50e509a6394300e1577e189578a20e/json_stream_rs_tokenizer-0.4.32-cp313-cp313-manylinux_2_28_aarch64.whl", hash = "sha256:74f9e8febdee5a6f2bd87bb0418f5beac19a550622ebb3a81fc5657c0a328dd4", size = 324802, upload-time = "2025-11-10T21:13:09.338Z" },
+    { url = "https://files.pythonhosted.org/packages/66/f9/983f5abcecc0ba18ce4e4f6b959864a422c00177fc411867aa976750c496/json_stream_rs_tokenizer-0.4.32-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:14a132682c6298af933913d6a101b841da3d362f4e0c353ab2bf9451a5d5fd44", size = 334093, upload-time = "2025-11-10T21:13:10.678Z" },
+    { url = "https://files.pythonhosted.org/packages/80/92/a1abd85154612d44cc3e34dfc4ea74478dbb0f06996fb8c8c4ae7683b0cc/json_stream_rs_tokenizer-0.4.32-cp313-cp313-win32.whl", hash = "sha256:af9a15f87fe81dd24e1c66dcf01d38a45bc37307e2f7efd19a3c2ca1ea1c62cb", size = 173925, upload-time = "2025-11-10T21:13:12.392Z" },
+    { url = "https://files.pythonhosted.org/packages/f3/60/7c7a5745c34aeb3437d7b2c2bdd28191aaf0f49086b55abc6de474efb965/json_stream_rs_tokenizer-0.4.32-cp313-cp313-win_amd64.whl", hash = "sha256:66536a44d4b54ed5f55d67be0a27244d3b3fe354d926c5e979612d4d7210ce3a", size = 181321, upload-time = "2025-11-10T21:13:14.025Z" },
+    { url = "https://files.pythonhosted.org/packages/6d/52/c80656fbc28becbce2e57dbe30750de863918a18138d80dfa30d92bd9273/json_stream_rs_tokenizer-0.4.32-cp314-cp314-macosx_10_15_x86_64.whl", hash = "sha256:6f98cd65a3933c3f7a9e30f637648c29e83c7bec2d6558f7e200eea277045dac", size = 299940, upload-time = "2025-11-10T21:13:15.647Z" },
+    { url = "https://files.pythonhosted.org/packages/d9/36/6ace928c5ceab84c25c8947008873055ff8ce6ef7bb8cb8c30cf829647e2/json_stream_rs_tokenizer-0.4.32-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:098d5e4b8237915bff404f50460d69b61c495f15347327318e493c5799af4d4f", size = 291054, upload-time = "2025-11-10T21:13:17.068Z" },
+    { url = "https://files.pythonhosted.org/packages/9c/56/e7629da25066dc9a66e41e42280681e81cf3e52eaef13f271871bf7aa770/json_stream_rs_tokenizer-0.4.32-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:9ae4d75e27211e1b8f0a4c9de5e722f9c660b42c52f3abe564e739b17536d25e", size = 324242, upload-time = "2025-11-10T21:13:18.485Z" },
+    { url = "https://files.pythonhosted.org/packages/ec/f9/c0147e00947200c30e0ed2c6f653d3a6f4c841ae40e408ef9507ab7ffd03/json_stream_rs_tokenizer-0.4.32-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:67841ce9455b5f4fc5cc1cbe9fb26dffd625c0b8f4d4335934bd025aa241422a", size = 334110, upload-time = "2025-11-10T21:13:19.921Z" },
+    { url = "https://files.pythonhosted.org/packages/5f/22/ca50f9fbe1bd90101e5f02de115ffbf46675309e83e0ca6a4462d1d2fbc6/json_stream_rs_tokenizer-0.4.32-cp314-cp314-win32.whl", hash = "sha256:7a6f3e6bae7b97ef5aadf98b2808ea96a84015a8cdea4a5ebaaa07c9cb502861", size = 178072, upload-time = "2025-11-10T21:13:21.198Z" },
+    { url = "https://files.pythonhosted.org/packages/5b/f5/8afccd84c19014861eb0595f4a48b38dd3a3209184b8ff0d09c29f1051c9/json_stream_rs_tokenizer-0.4.32-cp314-cp314-win_amd64.whl", hash = "sha256:eb1939eda685346e3a50864b26b4ec056ebe1fb9076581db1f4159f5f129abf5", size = 185606, upload-time = "2025-11-10T21:13:22.435Z" },
 ]
 
 [[package]]
