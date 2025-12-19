@@ -263,7 +263,9 @@ class TestVagrantSandboxEnvironment:
         assert result.returncode == 0
         assert result.stdout == "command output"
         assert result.stderr == ""
-        mock_vagrant.ssh.assert_called_once_with(vm_name=None, command="ls -la", input=None)
+        mock_vagrant.ssh.assert_called_once_with(
+            vm_name=None, command="ls -la", input=None
+        )
 
     @pytest.mark.unit
     @pytest.mark.asyncio
