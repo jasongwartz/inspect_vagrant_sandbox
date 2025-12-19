@@ -10,7 +10,6 @@ from logging import getLogger
 from vagrant import Vagrant as BaseVagrant
 from pydantic import BaseModel, Field
 
-import aiofiles  # type: ignore
 from inspect_ai.util import (
     ExecResult,
     SandboxConnection,
@@ -126,11 +125,11 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
 
     def __init__(
         self,
-        tmpdir_context: aiofiles.tempfile.AiofilesContextManagerTempDir,
+        tmpdir: Path,
         vagrant: Vagrant,
     ):
         self.vagrant = vagrant
-        self.tmpdir_context = tmpdir_context
+        self.tmpdir = tmpdir
 
     @classmethod
     async def task_init(
@@ -141,7 +140,15 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                 raise ValueError("config must be a VagrantSandboxEnvironmentConfig")
             # async_proxmox_api = cls._create_async_proxmox_api(config)
             # await ProxmoxSandboxEnvironment.ensure_vms(async_proxmox_api, config)
+            #
+            # TODO: create task dir for all tmp vagrantfiles?
         return None
+
+    @classmethod
+    def task_name_path_safe(cls, task_name: str) -> str:
+        return task_name.replace(
+            " ", "_"
+        )  # TODO: there's probably a more posix-safe method for this?
 
     @classmethod
     @override
@@ -154,12 +161,18 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         config = config or VagrantSandboxEnvironmentConfig()
         assert isinstance(config, VagrantSandboxEnvironmentConfig)
 
-        tmpdir_context = aiofiles.tempfile.TemporaryDirectory()
-        tmpdir = await tmpdir_context.__aenter__()
+        tmpdir = (
+            Path(
+                # config dir!
+                cls.task_name_path_safe(task_name)
+            )
+            / "Vagrantfile"
+        )
+
         await asyncio.to_thread(
             shutil.copy2,
             config.vagrantfile_path,
-            (Path(tmpdir) / "Vagrantfile").as_posix(),
+            tmpdir.as_posix(),
         )
 
         vagrant = Vagrant(root=tmpdir)
@@ -171,7 +184,7 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             raise e
 
         sandboxes: dict[str, SandboxEnvironment] = {}
-        vagrant_sandbox_environment = VagrantSandboxEnvironment(tmpdir_context, vagrant)
+        vagrant_sandbox_environment = VagrantSandboxEnvironment(tmpdir, vagrant)
         sandboxes["default"] = vagrant_sandbox_environment
 
         # borrowed from k8s provider
@@ -200,7 +213,8 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                 if isinstance(env, VagrantSandboxEnvironment):
                     # TODO: teardown group if more than one?
                     await _run_in_executor(env.vagrant.destroy)
-                    await env.tmpdir_context.__aexit__(None, None, None)
+                    env.tmpdir.unlink()
+                    env.tmpdir.parent.rmdir()
         return None
 
     @classmethod
@@ -218,9 +232,9 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             raise ValueError("config must be a VagrantSandboxEnvironmentConfig")
 
         if cleanup:
-            print("NOT IMPLEMENTED!")
-            # TODO:
-            # Figure out how to clean up instances
+            tmpdirs = Path(cls.task_name_path_safe(task_name))
+            for subdir in tmpdirs.walk():  # TODO - is .walk() correct here?
+                await _run_in_executor(Vagrant(root=subdir).destroy)
         else:
             print(
                 "\nCleanup all sandbox releases with: "
@@ -295,7 +309,8 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         else:
             assert_never(contents)  # type: ignore[arg-type]
 
-        command = " ".join(
+        command = (
+            " ".join(
                 [
                     "echo",
                     contents_str,
@@ -303,19 +318,21 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                     file,
                 ]
             ),
-        result = await self.vagrant.ssh(
-            command=command
         )
+        result = await self.vagrant.ssh(command=command)
         if result["returncode"] != 0:
-            raise subprocess.CalledProcessError(result["returncode"], command, result["stdout"])
-
+            raise subprocess.CalledProcessError(
+                result["returncode"], command, result["stdout"]
+            )
 
     @override
     async def read_file(self, file: str, text: bool = True) -> str | bytes:  # type: ignore
         command = f"cat f{file}"
         result = await self.vagrant.ssh(command=command)
         if result["returncode"] != 0:
-            raise subprocess.CalledProcessError(result["returncode"], command, result["stdout"])
+            raise subprocess.CalledProcessError(
+                result["returncode"], command, result["stdout"]
+            )
 
         return result["stdout"]
         # type-ignore is because Mypy complains that this override doesn't implement bytes return
