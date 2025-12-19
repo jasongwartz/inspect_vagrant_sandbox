@@ -23,12 +23,15 @@ from inspect_ai.util import (
 )
 
 
-APP_NAME = "inspect-vagrant-sandbox"
+# This value will be used to create directories like eg.
+# `~/.cache/inspect-vagrant-sandbox/...` or equivalent on other
+# operating systems.
+SANDBOX_VAGRANTFILE_CONFIG_DIRECTORY_NAME = "inspect-vagrant-sandbox"
 
 
 def get_sandbox_cache_dir() -> Path:
     """Get the base cache directory for vagrant sandboxes."""
-    return Path(user_cache_dir(APP_NAME))
+    return Path(user_cache_dir(SANDBOX_VAGRANTFILE_CONFIG_DIRECTORY_NAME))
 
 
 class SandboxDirectory:
