@@ -246,7 +246,9 @@ class TestVagrantSandboxEnvironment:
             "test_task", None, environments, interrupted=False
         )
 
-        mock_vagrant._run_vagrant_command_async.assert_called_once_with(["destroy", "-f"])
+        mock_vagrant._run_vagrant_command_async.assert_called_once_with(
+            ["destroy", "-f"]
+        )
         mock_sandbox_dir.cleanup.assert_called_once()
 
     @pytest.mark.unit
