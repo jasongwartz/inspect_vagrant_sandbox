@@ -588,7 +588,7 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         timeout: int | None = None,
         timeout_retry: bool = True,
     ) -> ExecResult[str]:
-        command = " ".join(cmd)
+        command = shlex.join(cmd)
         with trace_action(
             self.logger,
             self.TRACE_NAME,
