@@ -31,6 +31,7 @@ from platformdirs import user_cache_dir
 from pydantic import BaseModel, Field
 from vagrant import Vagrant as BaseVagrant
 
+
 class SandboxUnrecoverableError(Exception):
     """Raised when the sandbox enters an unrecoverable state.
 
