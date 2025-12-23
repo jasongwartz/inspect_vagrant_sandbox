@@ -690,3 +690,31 @@ class TestTimeoutHandling:
             # Both terminate and kill should have been attempted
             assert mock_process._terminated is True
             assert mock_process._killed is True
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_timeout_zero_raises_value_error(self):
+        """Test that timeout=0 raises ValueError."""
+        mock_process = MockAsyncProcess(returncode=0, stdout="output")
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_process):
+            vagrant = Vagrant(root="/tmp/test")
+
+            with pytest.raises(ValueError) as exc_info:
+                await vagrant._run_vagrant_command_async(["status"], timeout=0)
+
+            assert "timeout must be positive" in str(exc_info.value)
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_timeout_negative_raises_value_error(self):
+        """Test that negative timeout raises ValueError."""
+        mock_process = MockAsyncProcess(returncode=0, stdout="output")
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_process):
+            vagrant = Vagrant(root="/tmp/test")
+
+            with pytest.raises(ValueError) as exc_info:
+                await vagrant._run_vagrant_command_async(["status"], timeout=-5)
+
+            assert "timeout must be positive" in str(exc_info.value)

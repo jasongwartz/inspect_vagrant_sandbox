@@ -213,6 +213,8 @@ class Vagrant(BaseVagrant):
                 input=input.encode("utf-8") if isinstance(input, str) else input
             )
             if timeout is not None:
+                if timeout <= 0:
+                    raise ValueError(f"timeout must be positive, got {timeout}")
                 stdout, stderr = await asyncio.wait_for(
                     communicate_coro, timeout=float(timeout)
                 )
