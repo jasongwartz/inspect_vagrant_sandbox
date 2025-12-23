@@ -143,11 +143,11 @@ class MockAsyncProcess:
         self.returncode = -9
 
     async def wait(self):
-        # If we resist terminate and haven't been killed yet, hang
-        if self._resist_terminate and not self._killed:
-            await asyncio.sleep(3600)
-        # If we resist kill entirely, always hang
-        elif self._resist_kill and self._killed:
+        # If we resist terminate and haven't been killed yet,
+        # or resist kill entirely, we should hang
+        if (self._resist_terminate and not self._killed) or (
+            self._resist_kill and self._killed
+        ):
             await asyncio.sleep(3600)
 
 
