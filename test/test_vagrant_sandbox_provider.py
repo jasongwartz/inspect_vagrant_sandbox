@@ -306,6 +306,38 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_exec_escapes_shell_metacharacters(self, mock_vagrant, mock_sandbox_dir):
+        """Test that shell metacharacters are properly escaped."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
+
+        await env.exec(["bash", "-c", "ls && cat /etc/passwd"])
+
+        call_args = mock_vagrant.ssh.call_args
+        command = call_args[1]["command"]
+        # shlex.join should quote the argument containing &&
+        assert "&&" not in command.split("'")[0], "Metacharacters should be quoted"
+        assert "'ls && cat /etc/passwd'" in command
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("metachar", ["&&", "||", ";", "|", "$(cmd)", "`cmd`"])
+    async def test_exec_escapes_various_metacharacters(
+        self, mock_vagrant, mock_sandbox_dir, metachar
+    ):
+        """Test various shell metacharacters are escaped."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
+
+        await env.exec(["echo", f"test {metachar} injection"])
+
+        command = mock_vagrant.ssh.call_args[1]["command"]
+        # The metacharacter should appear inside quotes, not bare
+        assert command.startswith("echo "), "Command should start with 'echo '"
+        assert metachar not in command.split("'")[0], f"{metachar} should be quoted"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_write_file_success(self, mock_vagrant, mock_sandbox_dir):
         """Test successful file writing."""
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
