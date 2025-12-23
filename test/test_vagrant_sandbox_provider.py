@@ -4,12 +4,12 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from pathlib import Path
-from inspect_ai._util.exception import TerminateSampleError
 from vagrantsandbox.vagrant_sandbox_provider import (
     Vagrant,
     VagrantSandboxEnvironment,
     VagrantSandboxEnvironmentConfig,
     SandboxDirectory,
+    SandboxUnrecoverableError,
     _run_in_executor,
 )
 
@@ -672,15 +672,15 @@ class TestTimeoutHandling:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_unkillable_process_raises_terminate_sample_error(self):
-        """Test that an unkillable process raises TerminateSampleError to kill the sample."""
+    async def test_unkillable_process_raises_sandbox_unrecoverable_error(self):
+        """Test that an unkillable process raises SandboxUnrecoverableError to fail the sample."""
         # resist_kill implies hang_forever (process hangs and can't be killed)
         mock_process = MockAsyncProcess(resist_kill=True)
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_process):
             vagrant = Vagrant(root="/tmp/test")
 
-            with pytest.raises(TerminateSampleError) as exc_info:
+            with pytest.raises(SandboxUnrecoverableError) as exc_info:
                 await vagrant._run_vagrant_command_async(
                     ["ssh", "default", "--command", "sleep infinity"],
                     timeout=1,

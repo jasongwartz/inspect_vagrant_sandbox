@@ -19,7 +19,6 @@ from typing import (
     override,
 )
 
-from inspect_ai._util.exception import TerminateSampleError
 from inspect_ai.util import (
     ExecResult,
     SandboxConnection,
@@ -31,6 +30,18 @@ from inspect_ai.util import (
 from platformdirs import user_cache_dir
 from pydantic import BaseModel, Field
 from vagrant import Vagrant as BaseVagrant
+
+class SandboxUnrecoverableError(Exception):
+    """Raised when the sandbox enters an unrecoverable state.
+
+    This exception indicates that the sandbox cannot continue to operate
+    reliably, for example when a process cannot be terminated even after
+    SIGKILL. Unlike TimeoutError (which allows the sample to continue),
+    this exception will cause the sample to fail.
+    """
+
+    pass
+
 
 # This value will be used to create directories like eg.
 # `~/.cache/inspect-vagrant-sandbox/...` or equivalent on other
@@ -220,7 +231,7 @@ class Vagrant(BaseVagrant):
                     self.logger.error(
                         "Process did not respond to kill signal, abandoning."
                     )
-                    raise TerminateSampleError(
+                    raise SandboxUnrecoverableError(
                         f"Process could not be terminated after {timeout}s timeout - "
                         "sandbox may be in an inconsistent state"
                     )
