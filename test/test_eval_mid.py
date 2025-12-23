@@ -55,9 +55,9 @@ def test_inspect_eval() -> None:
                 ModelOutput.for_tool_call(
                     model="mockllm/model",
                     tool_name="bash",
-                    tool_arguments={"cmd": "'uname -a'"},
-                    # TODO: check if models do the quoting I added
-                    # (was "uname -a" (without extra single quotes) in the Proxmox provider)
+                    tool_arguments={"cmd": "uname -a"},
+                    # Extra quotes no longer needed: shlex.join() now handles
+                    # shell escaping (previously ' '.join() required manual quoting)
                 ),
                 ModelOutput.for_tool_call(
                     model="mockllm/model",
