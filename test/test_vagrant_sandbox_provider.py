@@ -101,13 +101,30 @@ def mock_vagrant_for_unit_tests(request):
 class MockAsyncProcess:
     """Helper class to mock async subprocess."""
 
-    def __init__(self, returncode=0, stdout="", stderr=""):
+    def __init__(self, returncode=0, stdout="", stderr="", hang_forever=False):
         self.returncode = returncode
         self._stdout = stdout.encode() if isinstance(stdout, str) else stdout
         self._stderr = stderr.encode() if isinstance(stderr, str) else stderr
+        self._hang_forever = hang_forever
+        self._killed = False
+        self._terminated = False
 
     async def communicate(self, input=None):
+        if self._hang_forever:
+            # Simulate a hanging process by waiting indefinitely
+            await asyncio.sleep(3600)
         return self._stdout, self._stderr
+
+    def terminate(self):
+        self._terminated = True
+        self.returncode = -15
+
+    def kill(self):
+        self._killed = True
+        self.returncode = -9
+
+    async def wait(self):
+        pass
 
 
 class TestVagrant:
@@ -284,7 +301,7 @@ class TestVagrantSandboxEnvironment:
         assert result.stdout == "command output"
         assert result.stderr == ""
         mock_vagrant.ssh.assert_called_once_with(
-            vm_name=None, command="ls -la", input=None
+            vm_name=None, command="ls -la", input=None, timeout=None
         )
 
     @pytest.mark.unit
@@ -532,3 +549,116 @@ async def test_sample_lifecycle_unit(
 
         # Verify cleanup was called
         mock_sandbox_patches["sandbox"].cleanup.assert_called_once()
+
+
+class TestTimeoutHandling:
+    """Test timeout handling for command execution."""
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_run_vagrant_command_async_with_timeout_success(self):
+        """Test that timeout is respected when command completes in time."""
+        mock_process = MockAsyncProcess(returncode=0, stdout="output")
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_process):
+            vagrant = Vagrant(root="/tmp/test")
+            result = await vagrant._run_vagrant_command_async(["status"], timeout=30)
+
+            assert result["returncode"] == 0
+            assert result["stdout"] == "output"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_run_vagrant_command_async_timeout_terminates_process(self):
+        """Test that a hanging process is terminated when timeout expires."""
+        mock_process = MockAsyncProcess(hang_forever=True)
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_process):
+            vagrant = Vagrant(root="/tmp/test")
+
+            with pytest.raises(TimeoutError) as exc_info:
+                await vagrant._run_vagrant_command_async(
+                    ["ssh", "default", "--command", "sleep 1000"],
+                    timeout=1,
+                )
+
+            assert "timed out" in str(exc_info.value).lower()
+            # Process should be terminated (graceful shutdown attempted first)
+            assert mock_process._terminated is True
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_run_vagrant_command_async_no_timeout(self):
+        """Test that without timeout, command runs without wait_for wrapper."""
+        mock_process = MockAsyncProcess(returncode=0, stdout="done")
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_process):
+            vagrant = Vagrant(root="/tmp/test")
+            result = await vagrant._run_vagrant_command_async(["status"])
+
+            assert result["returncode"] == 0
+            assert result["stdout"] == "done"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_ssh_passes_timeout_to_run_command(self):
+        """Test that ssh() passes timeout through to _run_vagrant_command_async."""
+        mock_process = MockAsyncProcess(returncode=0, stdout="ssh output")
+
+        with patch(
+            "asyncio.create_subprocess_exec", return_value=mock_process
+        ) as mock_exec:
+            vagrant = Vagrant(root="/tmp/test")
+            result = await vagrant.ssh(vm_name="default", command="ls", timeout=60)
+
+            assert result["returncode"] == 0
+            mock_exec.assert_called_once()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_ssh_timeout_terminates_hanging_command(self):
+        """Test that ssh command is terminated on timeout."""
+        mock_process = MockAsyncProcess(hang_forever=True)
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_process):
+            vagrant = Vagrant(root="/tmp/test")
+
+            with pytest.raises(TimeoutError):
+                await vagrant.ssh(
+                    vm_name="default", command="sleep infinity", timeout=1
+                )
+
+            assert mock_process._terminated is True
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_passes_timeout_to_ssh(self, mock_sandbox_dir):
+        """Test that exec() passes timeout through to vagrant.ssh()."""
+        mock_vagrant = Mock(spec=Vagrant)
+        mock_vagrant.ssh = AsyncMock(
+            return_value={"returncode": 0, "stdout": "output", "stderr": ""}
+        )
+
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        result = await env.exec(["ls", "-la"], timeout=120)
+
+        assert result.success is True
+        mock_vagrant.ssh.assert_called_once_with(
+            vm_name=None, command="ls -la", input=None, timeout=120
+        )
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_timeout_propagates_error(self, mock_sandbox_dir):
+        """Test that TimeoutError from ssh is propagated through exec()."""
+        mock_vagrant = Mock(spec=Vagrant)
+        mock_vagrant.ssh = AsyncMock(
+            side_effect=TimeoutError("Command execution timed out after 5 seconds.")
+        )
+
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+
+        with pytest.raises(TimeoutError) as exc_info:
+            await env.exec(["sleep", "1000"], timeout=5)
+
+        assert "timed out" in str(exc_info.value).lower()

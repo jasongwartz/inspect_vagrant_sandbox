@@ -1,36 +1,35 @@
 import asyncio
 import os
-from os import getenv
-from pathlib import Path
 import shlex
 import shutil
 import subprocess
 import uuid
+from logging import getLogger
+from os import getenv
+from pathlib import Path
 from typing import (
     Any,
     Callable,
     Coroutine,
     Literal,
-    TypeVar,
     TypedDict,
+    TypeVar,
     assert_never,
     overload,
     override,
 )
-from logging import getLogger
-from vagrant import Vagrant as BaseVagrant
-from pydantic import BaseModel, Field
-from platformdirs import user_cache_dir
 
 from inspect_ai.util import (
     ExecResult,
     SandboxConnection,
     SandboxEnvironment,
-    sandboxenv,
     SandboxEnvironmentConfigType,
+    sandboxenv,
     trace_action,
 )
-
+from platformdirs import user_cache_dir
+from pydantic import BaseModel, Field
+from vagrant import Vagrant as BaseVagrant
 
 # This value will be used to create directories like eg.
 # `~/.cache/inspect-vagrant-sandbox/...` or equivalent on other
@@ -163,7 +162,7 @@ class Vagrant(BaseVagrant):
             return []
 
     async def _run_vagrant_command_async(
-        self, args, input: str | bytes | None = None
+        self, args, input: str | bytes | None = None, timeout: int | None = None
     ) -> ExecCommandReturn:
         """
         Run a vagrant command and return everything, not just stdout.
@@ -186,7 +185,7 @@ class Vagrant(BaseVagrant):
             asyncio.subprocess.PIPE if input is not None else asyncio.subprocess.DEVNULL
         )
 
-        result = await asyncio.create_subprocess_exec(
+        process = await asyncio.create_subprocess_exec(
             *command,
             stdin=stdin_mode,
             stdout=asyncio.subprocess.PIPE,
@@ -195,11 +194,34 @@ class Vagrant(BaseVagrant):
             env=self.env,
         )
 
-        stdout, stderr = await result.communicate(
-            input=input.encode("utf-8") if isinstance(input, str) else input
-        )
+        try:
+            communicate_coro = process.communicate(
+                input=input.encode("utf-8") if isinstance(input, str) else input
+            )
+            if timeout is not None:
+                stdout, stderr = await asyncio.wait_for(
+                    communicate_coro, timeout=float(timeout)
+                )
+            else:
+                stdout, stderr = await communicate_coro
+        except asyncio.TimeoutError:
+            # Try graceful termination first
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                # Force kill if termination didn't work
+                process.kill()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    # Give up waiting - process is likely orphaned
+                    self.logger.error(
+                        "Process did not respond to kill signal, abandoning."
+                    )
+            raise TimeoutError(f"Command execution timed out after {timeout} seconds.")
 
-        assert result.returncode is not None, (
+        assert process.returncode is not None, (
             "returncode should be set after communicate()"
         )
 
@@ -210,7 +232,7 @@ class Vagrant(BaseVagrant):
         return {
             "stdout": stdout_str,
             "stderr": stderr_str,
-            "returncode": result.returncode,
+            "returncode": process.returncode,
         }
 
     @override
@@ -220,19 +242,22 @@ class Vagrant(BaseVagrant):
         command: str | None = None,
         extra_ssh_args: str | None = None,
         input: str | bytes | None = None,
+        timeout: int | None = None,
     ) -> Coroutine[Any, Any, ExecCommandReturn]:
         """
         Execute a command via ssh on the vm specified.
+
         command: The command to execute via ssh.
         extra_ssh_args: Corresponds to '--' option in the vagrant ssh command
         input: Optional input to pass to stdin of the command.
+        timeout: Optional timeout in seconds for the command execution.
         Returns the output of running the command.
         """
         cmd = ["ssh", vm_name, "--no-tty", "--command", command]
         if extra_ssh_args is not None:
             cmd += ["--", extra_ssh_args]
 
-        return self._run_vagrant_command_async(cmd, input=input)
+        return self._run_vagrant_command_async(cmd, input=input, timeout=timeout)
 
 
 T = TypeVar("T")
@@ -596,7 +621,7 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             "exec_command ",
         ):
             result = await self.vagrant.ssh(
-                vm_name=self.vm_name, command=command, input=input
+                vm_name=self.vm_name, command=command, input=input, timeout=timeout
             )
 
             return ExecResult(
