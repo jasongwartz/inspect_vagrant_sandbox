@@ -175,7 +175,8 @@ class Vagrant(BaseVagrant):
             return []
 
     async def _run_vagrant_command_async(
-        self, args, input: str | bytes | None = None, timeout: int | None = None
+    async def _run_vagrant_command_async(
+        self, args: list[str | None], input: str | bytes | None = None, timeout: int | None = None
     ) -> ExecCommandReturn:
         """
         Run a vagrant command and return everything, not just stdout.
