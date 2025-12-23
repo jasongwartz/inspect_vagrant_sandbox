@@ -10,6 +10,7 @@ from vagrantsandbox.vagrant_sandbox_provider import (
     VagrantSandboxEnvironmentConfig,
     SandboxDirectory,
     SandboxUnrecoverableError,
+    TimeoutConfig,
     _run_in_executor,
 )
 
@@ -603,7 +604,7 @@ class TestTimeoutHandling:
             with pytest.raises(TimeoutError) as exc_info:
                 await vagrant._run_vagrant_command_async(
                     ["ssh", "default", "--command", "sleep infinity"],
-                    timeout=1,
+                    timeout=TimeoutConfig(timeout=1, terminate_grace=0.1, kill_grace=0.1),
                 )
 
             assert "timed out" in str(exc_info.value).lower()
@@ -649,7 +650,9 @@ class TestTimeoutHandling:
 
             with pytest.raises(TimeoutError):
                 await vagrant.ssh(
-                    vm_name="default", command="sleep infinity", timeout=1
+                    vm_name="default",
+                    command="sleep infinity",
+                    timeout=TimeoutConfig(timeout=1, terminate_grace=0.1, kill_grace=0.1),
                 )
 
             assert mock_process._terminated is True
@@ -665,7 +668,9 @@ class TestTimeoutHandling:
 
             with pytest.raises(TimeoutError):
                 await vagrant.ssh(
-                    vm_name="default", command="sleep infinity", timeout=1
+                    vm_name="default",
+                    command="sleep infinity",
+                    timeout=TimeoutConfig(timeout=1, terminate_grace=0.1, kill_grace=0.1),
                 )
 
             # Process should be both terminated AND killed since it didn't respond to terminate
@@ -718,7 +723,7 @@ class TestTimeoutHandling:
             with pytest.raises(SandboxUnrecoverableError) as exc_info:
                 await vagrant._run_vagrant_command_async(
                     ["ssh", "default", "--command", "sleep infinity"],
-                    timeout=1,
+                    timeout=TimeoutConfig(timeout=1, terminate_grace=0.1, kill_grace=0.1),
                 )
 
             assert "could not be terminated" in str(exc_info.value).lower()

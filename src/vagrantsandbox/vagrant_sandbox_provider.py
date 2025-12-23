@@ -4,6 +4,7 @@ import shlex
 import shutil
 import subprocess
 import uuid
+from dataclasses import dataclass
 from logging import getLogger
 from os import getenv
 from pathlib import Path
@@ -42,6 +43,13 @@ class SandboxUnrecoverableError(Exception):
     """
 
     pass
+
+
+@dataclass
+class TimeoutConfig:
+    timeout: float
+    terminate_grace: float = 5.0
+    kill_grace: float = 5.0
 
 
 # This value will be used to create directories like eg.
@@ -196,7 +204,7 @@ class Vagrant(BaseVagrant):
         self,
         args: list[str | None],
         input: str | bytes | None = None,
-        timeout: int | None = None,
+        timeout: int | float | TimeoutConfig | None = None,
     ) -> ExecCommandReturn:
         """
         Run a vagrant command and return everything, not just stdout.
@@ -205,7 +213,19 @@ class Vagrant(BaseVagrant):
         e.g. ['up', 'my_vm_name', '--no-provision'] or
         ['up', None, '--no-provision'] for a non-Multi-VM environment.
         input: Optional input to pass to stdin.
+        timeout: Optional timeout - can be a number (seconds) or TimeoutConfig
+            for fine-grained control over grace periods.
         """
+        # Extract timeout configuration
+        timeout_val: float | None
+        if isinstance(timeout, TimeoutConfig):
+            timeout_val = timeout.timeout
+            terminate_grace = timeout.terminate_grace
+            kill_grace = timeout.kill_grace
+        else:
+            timeout_val = float(timeout) if timeout is not None else None
+            terminate_grace = 5.0
+            kill_grace = 5.0
         # Make subprocess command
         command = self._make_vagrant_command(args)
         self.logger.debug(f"Vagrant command: {command}")
@@ -232,11 +252,11 @@ class Vagrant(BaseVagrant):
             communicate_coro = process.communicate(
                 input=input.encode("utf-8") if isinstance(input, str) else input
             )
-            if timeout is not None:
-                if timeout <= 0:
-                    raise ValueError(f"timeout must be positive, got {timeout}")
+            if timeout_val is not None:
+                if timeout_val <= 0:
+                    raise ValueError(f"timeout must be positive, got {timeout_val}")
                 stdout, stderr = await asyncio.wait_for(
-                    communicate_coro, timeout=float(timeout)
+                    communicate_coro, timeout=float(timeout_val)
                 )
             else:
                 stdout, stderr = await communicate_coro
@@ -244,22 +264,24 @@ class Vagrant(BaseVagrant):
             # Try graceful termination first
             process.terminate()
             try:
-                await asyncio.wait_for(process.wait(), timeout=5.0)
+                await asyncio.wait_for(process.wait(), timeout=terminate_grace)
             except asyncio.TimeoutError:
                 # Force kill if termination didn't work
                 process.kill()
                 try:
-                    await asyncio.wait_for(process.wait(), timeout=5.0)
+                    await asyncio.wait_for(process.wait(), timeout=kill_grace)
                 except asyncio.TimeoutError:
                     # Give up waiting - process is likely orphaned
                     self.logger.error(
                         "Process did not respond to kill signal, abandoning."
                     )
                     raise SandboxUnrecoverableError(
-                        f"Process could not be terminated after {timeout}s timeout - "
+                        f"Process could not be terminated after {timeout_val}s timeout - "
                         "sandbox may be in an inconsistent state"
                     )
-            raise TimeoutError(f"Command execution timed out after {timeout} seconds.")
+            raise TimeoutError(
+                f"Command execution timed out after {timeout_val} seconds."
+            )
 
         assert process.returncode is not None, (
             "returncode should be set after communicate()"
@@ -282,7 +304,7 @@ class Vagrant(BaseVagrant):
         command: str | None = None,
         extra_ssh_args: str | None = None,
         input: str | bytes | None = None,
-        timeout: int | None = None,
+        timeout: int | float | TimeoutConfig | None = None,
     ) -> Coroutine[Any, Any, ExecCommandReturn]:
         """
         Execute a command via ssh on the vm specified.
@@ -290,7 +312,7 @@ class Vagrant(BaseVagrant):
         command: The command to execute via ssh.
         extra_ssh_args: Corresponds to '--' option in the vagrant ssh command
         input: Optional input to pass to stdin of the command.
-        timeout: Optional timeout in seconds for the command execution.
+        timeout: Optional timeout - can be a number (seconds) or TimeoutConfig.
         Returns the output of running the command.
         """
         cmd = ["ssh", vm_name, "--no-tty", "--command", command]
