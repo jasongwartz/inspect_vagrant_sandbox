@@ -578,7 +578,7 @@ class TestTimeoutHandling:
 
             with pytest.raises(TimeoutError) as exc_info:
                 await vagrant._run_vagrant_command_async(
-                    ["ssh", "default", "--command", "sleep 1000"],
+                    ["ssh", "default", "--command", "sleep infinity"],
                     timeout=1,
                 )
 
