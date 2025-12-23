@@ -19,6 +19,7 @@ from typing import (
     override,
 )
 
+from inspect_ai._util.exception import TerminateSampleError
 from inspect_ai.util import (
     ExecResult,
     SandboxConnection,
@@ -218,6 +219,10 @@ class Vagrant(BaseVagrant):
                     # Give up waiting - process is likely orphaned
                     self.logger.error(
                         "Process did not respond to kill signal, abandoning."
+                    )
+                    raise TerminateSampleError(
+                        f"Process could not be terminated after {timeout}s timeout - "
+                        "sandbox may be in an inconsistent state"
                     )
             raise TimeoutError(f"Command execution timed out after {timeout} seconds.")
 

@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from pathlib import Path
+from inspect_ai._util.exception import TerminateSampleError
 from vagrantsandbox.vagrant_sandbox_provider import (
     Vagrant,
     VagrantSandboxEnvironment,
@@ -101,11 +102,15 @@ def mock_vagrant_for_unit_tests(request):
 class MockAsyncProcess:
     """Helper class to mock async subprocess."""
 
-    def __init__(self, returncode=0, stdout="", stderr="", hang_forever=False):
+    def __init__(
+        self, returncode=0, stdout="", stderr="", hang_forever=False, resist_kill=False
+    ):
         self.returncode = returncode
         self._stdout = stdout.encode() if isinstance(stdout, str) else stdout
         self._stderr = stderr.encode() if isinstance(stderr, str) else stderr
-        self._hang_forever = hang_forever
+        # resist_kill implies hang_forever (can't resist kill if you complete normally)
+        self._hang_forever = hang_forever or resist_kill
+        self._resist_kill = resist_kill
         self._killed = False
         self._terminated = False
 
@@ -124,7 +129,9 @@ class MockAsyncProcess:
         self.returncode = -9
 
     async def wait(self):
-        pass
+        if self._resist_kill:
+            # Simulate a process that won't die even after kill signal
+            await asyncio.sleep(3600)
 
 
 class TestVagrant:
@@ -662,3 +669,24 @@ class TestTimeoutHandling:
             await env.exec(["sleep", "1000"], timeout=5)
 
         assert "timed out" in str(exc_info.value).lower()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_unkillable_process_raises_terminate_sample_error(self):
+        """Test that an unkillable process raises TerminateSampleError to kill the sample."""
+        # resist_kill implies hang_forever (process hangs and can't be killed)
+        mock_process = MockAsyncProcess(resist_kill=True)
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_process):
+            vagrant = Vagrant(root="/tmp/test")
+
+            with pytest.raises(TerminateSampleError) as exc_info:
+                await vagrant._run_vagrant_command_async(
+                    ["ssh", "default", "--command", "sleep infinity"],
+                    timeout=1,
+                )
+
+            assert "could not be terminated" in str(exc_info.value).lower()
+            # Both terminate and kill should have been attempted
+            assert mock_process._terminated is True
+            assert mock_process._killed is True
