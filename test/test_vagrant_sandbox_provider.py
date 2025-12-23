@@ -100,16 +100,30 @@ def mock_vagrant_for_unit_tests(request):
 
 
 class MockAsyncProcess:
-    """Helper class to mock async subprocess."""
+    """Helper class to mock async subprocess.
+
+    Modes:
+    - Default: Process completes normally
+    - hang_forever=True: Process hangs on communicate(), responds to terminate()
+    - resist_terminate=True: Process ignores terminate(), responds to kill()
+    - resist_kill=True: Process ignores both terminate() and kill()
+    """
 
     def __init__(
-        self, returncode=0, stdout="", stderr="", hang_forever=False, resist_kill=False
+        self,
+        returncode=0,
+        stdout="",
+        stderr="",
+        hang_forever=False,
+        resist_terminate=False,
+        resist_kill=False,
     ):
         self.returncode = returncode
         self._stdout = stdout.encode() if isinstance(stdout, str) else stdout
         self._stderr = stderr.encode() if isinstance(stderr, str) else stderr
-        # resist_kill implies hang_forever (can't resist kill if you complete normally)
-        self._hang_forever = hang_forever or resist_kill
+        # resist_terminate or resist_kill implies hang_forever
+        self._hang_forever = hang_forever or resist_terminate or resist_kill
+        self._resist_terminate = resist_terminate or resist_kill
         self._resist_kill = resist_kill
         self._killed = False
         self._terminated = False
@@ -129,8 +143,11 @@ class MockAsyncProcess:
         self.returncode = -9
 
     async def wait(self):
-        if self._resist_kill:
-            # Simulate a process that won't die even after kill signal
+        # If we resist terminate and haven't been killed yet, hang
+        if self._resist_terminate and not self._killed:
+            await asyncio.sleep(3600)
+        # If we resist kill entirely, always hang
+        elif self._resist_kill and self._killed:
             await asyncio.sleep(3600)
 
 
@@ -636,6 +653,24 @@ class TestTimeoutHandling:
                 )
 
             assert mock_process._terminated is True
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_ssh_timeout_kills_stubborn_process(self):
+        """Test that a process that doesn't respond to terminate() gets killed."""
+        mock_process = MockAsyncProcess(resist_terminate=True)
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_process):
+            vagrant = Vagrant(root="/tmp/test")
+
+            with pytest.raises(TimeoutError):
+                await vagrant.ssh(
+                    vm_name="default", command="sleep infinity", timeout=1
+                )
+
+            # Process should be both terminated AND killed since it didn't respond to terminate
+            assert mock_process._terminated is True
+            assert mock_process._killed is True
 
     @pytest.mark.unit
     @pytest.mark.asyncio
