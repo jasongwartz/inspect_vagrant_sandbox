@@ -7,9 +7,17 @@ Test Categories:
 - inspect_eval: Tests that use the Inspect AI evaluation framework
 """
 
+import os
+
 
 def pytest_configure(config):
-    """Register custom markers for test categorization."""
+    """Register custom markers and configure test isolation."""
+    # Isolate sandbox cache directories for each pytest-xdist worker
+    # This prevents race conditions when parallel workers clean up sandboxes
+    worker_id = os.environ.get("PYTEST_XDIST_WORKER")
+    if worker_id:
+        os.environ["INSPECT_SANDBOX_CACHE_SUFFIX"] = f"worker-{worker_id}"
+
     config.addinivalue_line(
         "markers", "unit: Fast unit tests with no external dependencies"
     )

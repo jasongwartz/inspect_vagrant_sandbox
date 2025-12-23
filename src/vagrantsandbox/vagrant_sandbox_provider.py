@@ -39,8 +39,26 @@ SANDBOX_VAGRANTFILE_CONFIG_DIRECTORY_NAME = "inspect-vagrant-sandbox"
 
 
 def get_sandbox_cache_dir() -> Path:
-    """Get the base cache directory for vagrant sandboxes."""
-    return Path(user_cache_dir(SANDBOX_VAGRANTFILE_CONFIG_DIRECTORY_NAME))
+    """Get the base cache directory for vagrant sandboxes.
+
+    The cache directory can be customized via environment variables:
+    - INSPECT_SANDBOX_CACHE_DIR: Override the entire cache directory path
+    - INSPECT_SANDBOX_CACHE_SUFFIX: Append a subdirectory to the default cache path
+      (useful for isolating parallel test workers or CI environments)
+    """
+    # Allow complete override of cache directory
+    custom_dir = os.environ.get("INSPECT_SANDBOX_CACHE_DIR")
+    if custom_dir:
+        return Path(custom_dir)
+
+    base_dir = Path(user_cache_dir(SANDBOX_VAGRANTFILE_CONFIG_DIRECTORY_NAME))
+
+    # Allow appending a suffix for isolation (e.g., parallel test workers)
+    suffix = os.environ.get("INSPECT_SANDBOX_CACHE_SUFFIX")
+    if suffix:
+        return base_dir / suffix
+
+    return base_dir
 
 
 class SandboxDirectory:
