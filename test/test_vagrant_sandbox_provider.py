@@ -306,7 +306,9 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_exec_escapes_shell_metacharacters(self, mock_vagrant, mock_sandbox_dir):
+    async def test_exec_escapes_shell_metacharacters(
+        self, mock_vagrant, mock_sandbox_dir
+    ):
         """Test that shell metacharacters are properly escaped."""
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
         mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
