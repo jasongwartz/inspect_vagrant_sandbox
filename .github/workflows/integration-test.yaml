@@ -8,17 +8,37 @@ env:
   VAGRANT_TEST_VAGRANTFILE: Vagrantfile.ci
 
 jobs:
+  # First job: discover all vm_required tests dynamically
+  discover-tests:
+    runs-on: ubuntu-latest
+    outputs:
+      tests: ${{ steps.collect.outputs.tests }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Collect vm_required tests
+        id: collect
+        run: |
+          # Collect tests marked vm_required but not inspect_eval (which may need API keys)
+          tests=$(uv run pytest --collect-only -q -m "vm_required and not inspect_eval" 2>/dev/null \
+            | grep "::" \
+            | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "tests=$tests" >> "$GITHUB_OUTPUT"
+          echo "Discovered tests:"
+          echo "$tests" | jq .
+
+  # Second job: run each test in parallel using the dynamic matrix
   vm-test:
+    needs: discover-tests
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        test:
-          - test/test_ci_vm.py
-          - test/vagrantsandbox_test.py
-          - test/test_file_operations.py::test_cat_basic_file
-          - test/test_file_operations.py::test_cat_system_files
+        test: ${{ fromJson(needs.discover-tests.outputs.tests) }}
 
     steps:
       - uses: actions/checkout@v4
@@ -89,7 +109,7 @@ jobs:
       - name: Run VM integration test
         run: |
           # Run with sg to get libvirt group permissions
-          sg libvirt -c "uv run pytest ${{ matrix.test }} -v -s --tb=short"
+          sg libvirt -c "uv run pytest '${{ matrix.test }}' -v -s --tb=short"
 
       - name: Cleanup VMs on failure
         if: failure()
