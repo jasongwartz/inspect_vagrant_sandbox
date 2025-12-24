@@ -1,0 +1,23 @@
+# Vagrantfile for GitHub Actions CI (Ubuntu + libvirt/KVM)
+Vagrant.configure("2") do |config|
+  # Get unique suffix from environment variable to avoid VM name conflicts
+  vm_suffix = ENV['INSPECT_VM_SUFFIX'] || ''
+
+  # Define VM with unique name for parallel test execution
+  config.vm.define "default#{vm_suffix}" do |vm|
+    # generic/ubuntu2204 works well with libvirt
+    vm.vm.box = "generic/ubuntu2204"
+  end
+
+  config.vm.provider "libvirt" do |libvirt|
+    libvirt.memory = 1024
+    libvirt.cpus = 2
+    libvirt.driver = "kvm"
+  end
+
+  # Speed up SSH
+  config.ssh.insert_key = false
+
+  # Disable folder sync (not needed and can cause issues in CI)
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+end
