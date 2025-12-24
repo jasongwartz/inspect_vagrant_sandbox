@@ -31,7 +31,9 @@ jobs:
         id: collect
         run: |
           # Collect tests matching the marker expression defined in env.INTEGRATION_PYTEST_MARKER_EXPR
-          tests=$(uv run pytest --collect-only -q -m "$INTEGRATION_PYTEST_MARKER_EXPR" 2>/dev/null \
+          output=$(uv run pytest --collect-only -q -m "$INTEGRATION_PYTEST_MARKER_EXPR" 2>&1) || true
+          echo "$output"
+          tests=$(echo "$output" \
             | grep "::" \
             | jq -R -s -c 'split("\n") | map(select(length > 0))')
           echo "tests=$tests" >> "$GITHUB_OUTPUT"
@@ -58,9 +60,13 @@ jobs:
       - name: Check KVM availability
         run: |
           echo "Checking /dev/kvm..."
-          ls -la /dev/kvm || echo "/dev/kvm not found"
+          if [ ! -e /dev/kvm ]; then
+            echo "ERROR: /dev/kvm not found. KVM is required for VM tests."
+            exit 1
+          fi
+          ls -la /dev/kvm
           echo "Checking CPU virtualization support..."
-          grep -E -c '(vmx|svm)' /proc/cpuinfo || true
+          grep -E -c '(vmx|svm)' /proc/cpuinfo
 
       - name: Enable KVM group permissions
         run: |
@@ -111,8 +117,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.vagrant.d/boxes
-          key: vagrant-boxes-libvirt-${{ hashFiles('test/Vagrantfile.basic') }}
+          # Weekly rotation to pick up box updates; also invalidates on Vagrantfile changes
+          key: vagrant-boxes-libvirt-week${{ github.run_id }}-${{ hashFiles('test/Vagrantfile.basic') }}
           restore-keys: |
+            vagrant-boxes-libvirt-week
             vagrant-boxes-libvirt-
 
       - name: Run VM integration test
@@ -120,8 +128,8 @@ jobs:
           # Run with sg to get libvirt group permissions
           sg libvirt -c "uv run pytest '${{ matrix.test }}' -v -s --tb=short"
 
-      - name: Cleanup VMs on failure
-        if: failure()
+      - name: Cleanup VMs
+        if: always()
         run: |
           # List any running VMs
           sudo virsh list --all || true
