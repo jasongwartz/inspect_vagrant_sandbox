@@ -1,10 +1,21 @@
+import os
+
 import pytest
+
 from vagrantsandbox.vagrant_sandbox_provider import (
     VagrantSandboxEnvironment,
     VagrantSandboxEnvironmentConfig,
     _run_in_executor,
 )
-import os
+
+
+def get_test_vagrantfile():
+    """Get path to test Vagrantfile.
+
+    Uses VAGRANT_TEST_VAGRANTFILE env var if set (for CI), otherwise defaults to Vagrantfile.basic.
+    """
+    vagrantfile = os.environ.get("VAGRANT_TEST_VAGRANTFILE", "Vagrantfile.basic")
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), vagrantfile)
 
 
 @pytest.mark.vm_required
@@ -12,10 +23,7 @@ import os
 async def test_sandbox_up_down():
     sandboxes = await VagrantSandboxEnvironment.sample_init(
         "test1",
-        VagrantSandboxEnvironmentConfig(
-            vagrantfile_path=(os.path.dirname(os.path.abspath(__file__)))
-            + "/Vagrantfile.basic"
-        ),
+        VagrantSandboxEnvironmentConfig(vagrantfile_path=get_test_vagrantfile()),
         {},
     )
     sandbox = sandboxes["default"]
@@ -36,10 +44,7 @@ async def test_sandbox_up_down():
 async def test_readfile_writefile():
     sandboxes = await VagrantSandboxEnvironment.sample_init(
         "test1",
-        VagrantSandboxEnvironmentConfig(
-            vagrantfile_path=(os.path.dirname(os.path.abspath(__file__)))
-            + "/Vagrantfile.basic"
-        ),
+        VagrantSandboxEnvironmentConfig(vagrantfile_path=get_test_vagrantfile()),
         {},
     )
     sandbox = sandboxes["default"]

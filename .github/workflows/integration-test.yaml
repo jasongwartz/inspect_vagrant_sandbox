@@ -4,10 +4,21 @@ on:
   pull_request:
   workflow_dispatch: # Allow manual triggering
 
+env:
+  VAGRANT_TEST_VAGRANTFILE: Vagrantfile.ci
+
 jobs:
   vm-test:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - test/test_ci_vm.py
+          - test/vagrantsandbox_test.py
+          - test/test_file_operations.py::test_cat_basic_file
+          - test/test_file_operations.py::test_cat_system_files
 
     steps:
       - uses: actions/checkout@v4
@@ -75,10 +86,10 @@ jobs:
           restore-keys: |
             vagrant-boxes-libvirt-
 
-      - name: Run single VM integration test
+      - name: Run VM integration test
         run: |
-          # Run with newgrp to get libvirt group permissions
-          sg libvirt -c "uv run pytest test/test_ci_vm.py::test_ci_vm_basic -v -s --tb=short"
+          # Run with sg to get libvirt group permissions
+          sg libvirt -c "uv run pytest ${{ matrix.test }} -v -s --tb=short"
 
       - name: Cleanup VMs on failure
         if: failure()

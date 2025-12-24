@@ -13,13 +13,20 @@ from vagrantsandbox.vagrant_sandbox_provider import (
 )
 
 
+def get_test_vagrantfile():
+    """Get path to test Vagrantfile.
+
+    Uses VAGRANT_TEST_VAGRANTFILE env var if set (for CI), otherwise defaults to Vagrantfile.ci.
+    """
+    vagrantfile = os.environ.get("VAGRANT_TEST_VAGRANTFILE", "Vagrantfile.ci")
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), vagrantfile)
+
+
 @pytest.mark.vm_required
 @pytest.mark.asyncio
 async def test_ci_vm_basic():
     """Test that we can start a VM, run a command, and clean up in CI."""
-    vagrantfile_path = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "Vagrantfile.ci"
-    )
+    vagrantfile_path = get_test_vagrantfile()
 
     sandboxes = await VagrantSandboxEnvironment.sample_init(
         "ci_test",
