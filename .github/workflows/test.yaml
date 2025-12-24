@@ -43,7 +43,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        test: ${{ fromJson(needs.discover-tests.outputs.tests) }}
+        test: ${{ fromJson(needs.discover-integration.outputs.tests) }}
 
     steps:
       - uses: actions/checkout@v4
