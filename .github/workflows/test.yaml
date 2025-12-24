@@ -117,11 +117,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.vagrant.d/boxes
-          # Weekly rotation to pick up box updates; also invalidates on Vagrantfile changes
-          key: vagrant-boxes-libvirt-week${{ github.run_id }}-${{ hashFiles('test/Vagrantfile.basic') }}
-          restore-keys: |
-            vagrant-boxes-libvirt-week
-            vagrant-boxes-libvirt-
+          # Invalidates when Vagrantfile changes (e.g., box version update)
+          key: vagrant-boxes-libvirt-${{ hashFiles('test/Vagrantfile.basic') }}
+          restore-keys: vagrant-boxes-libvirt-
 
       - name: Run VM integration test
         run: |
