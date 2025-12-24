@@ -57,7 +57,7 @@ async def test_readfile_writefile():
 
         assert (await sandbox.exec(["cat", "/tmp/test-contents"])).stdout == "1234"
 
-        assert await sandbox.read_file("/tmp/test-contents") == "1234"
+        assert await sandbox.read_file("/tmp/test-contents") == "12345"
 
         await sandbox.sample_cleanup(
             "test1", VagrantSandboxEnvironmentConfig(), {}, False
