@@ -30,12 +30,8 @@ from vagrantsandbox.vagrant_sandbox_provider import (
 
 
 def get_basic_vagrantfile():
-    """Get path to test Vagrantfile.
-
-    Uses VAGRANT_TEST_VAGRANTFILE env var if set (for CI), otherwise defaults to Vagrantfile.basic.
-    """
-    vagrantfile = os.environ.get("VAGRANT_TEST_VAGRANTFILE", "Vagrantfile.basic")
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), vagrantfile)
+    """Get path to Vagrantfile.basic."""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "Vagrantfile.basic")
 
 
 # ==============================================================================

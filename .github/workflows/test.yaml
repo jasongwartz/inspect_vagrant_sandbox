@@ -5,7 +5,9 @@ on:
 env:
   # Pytest marker expression used to discover integration tests
   # Modify this to change which tests are included in the CI matrix
-  INTEGRATION_PYTEST_MARKER_EXPR: "vm_required"
+  INTEGRATION_PYTEST_MARKER_EXPR: "vm_required and not inspect_eval"
+  # Use libvirt provider in CI (Vagrantfiles support both qemu and libvirt)
+  VAGRANT_DEFAULT_PROVIDER: libvirt
 
 jobs:
   unit:
@@ -38,6 +40,8 @@ jobs:
 
   integration:
     needs: discover-integration
+    # Skip if no tests were discovered
+    if: ${{ needs.discover-integration.outputs.tests != '[]' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -107,7 +111,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.vagrant.d/boxes
-          key: vagrant-boxes-libvirt-${{ hashFiles('test/Vagrantfile.ci') }}
+          key: vagrant-boxes-libvirt-${{ hashFiles('test/Vagrantfile.basic') }}
           restore-keys: |
             vagrant-boxes-libvirt-
 
