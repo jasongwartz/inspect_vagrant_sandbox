@@ -117,8 +117,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.vagrant.d/boxes
-          # Invalidates when Vagrantfile changes (e.g., box version update)
-          key: vagrant-boxes-libvirt-${{ hashFiles('test/Vagrantfile.basic') }}
+          # Invalidates when any Vagrantfile changes (e.g., box version update)
+          key: vagrant-boxes-libvirt-${{ hashFiles('test/Vagrantfile*') }}
           restore-keys: vagrant-boxes-libvirt-
 
       - name: Run VM integration test
