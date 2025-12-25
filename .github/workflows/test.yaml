@@ -5,7 +5,7 @@ on:
 env:
   # Pytest marker expression used to discover integration tests
   # Modify this to change which tests are included in the CI matrix
-  INTEGRATION_PYTEST_MARKER_EXPR: "vm_required and not inspect_eval"
+  INTEGRATION_PYTEST_MARKER_EXPR: vm_required
   # Use libvirt provider in CI (Vagrantfiles support both qemu and libvirt)
   VAGRANT_DEFAULT_PROVIDER: libvirt
 
