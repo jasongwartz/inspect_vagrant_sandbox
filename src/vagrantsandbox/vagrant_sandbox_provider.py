@@ -333,9 +333,9 @@ class VagrantSandboxEnvironmentConfig(BaseModel, frozen=True):
         default=None,
         description="Name of the VM to use as the 'default' sandbox environment. If None, uses first available VM.",
     )
-    extra_envs: dict[str, str] = Field(
-        default_factory=dict,
-        description="Extra environment variables to pass to Vagrant commands (e.g., for box selection).",
+    extra_envs: tuple[tuple[str, str], ...] = Field(
+        default=(),
+        description="Extra environment variables to pass to Vagrant commands as (key, value) pairs.",
     )
 
 
@@ -405,7 +405,7 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         # Set environment variable for Vagrantfile to use
         vagrant_env = os.environ.copy()
         vagrant_env["INSPECT_VM_SUFFIX"] = unique_suffix
-        vagrant_env.update(config.extra_envs)  # Apply user-provided env vars
+        vagrant_env.update(dict(config.extra_envs))  # Apply user-provided env vars
 
         vagrant = Vagrant(root=str(sandbox_dir), env=vagrant_env)
 
