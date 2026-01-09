@@ -1,0 +1,17 @@
+Vagrant.configure("2") do |config|
+  is_arm = `uname -m`.strip == "arm64"
+  vm_suffix = ENV['INSPECT_VM_SUFFIX'] || ''
+  test_env_value = ENV['TEST_EXTRA_ENV'] || 'NOT_SET'
+
+  config.vm.define "default#{vm_suffix}" do |vm|
+    vm.vm.box = is_arm ? "perk/ubuntu-2204-arm64" : "generic/ubuntu2204"
+    vm.vm.provision "shell", inline: "echo '#{test_env_value}' > /tmp/extra_env_marker"
+  end
+
+  config.vm.provider "qemu" do |qe|
+    qe.ssh_auto_correct = true
+  end
+
+  config.ssh.insert_key = false
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+end

@@ -118,6 +118,38 @@ def vagrant_example() -> Task:
     )
 ```
 
+### Environment Variables
+
+You can pass environment variables to the Vagrantfile using `extra_envs`. This is useful when you want to parameterize your Vagrantfile, for example to specify which base box to use:
+
+```ruby
+# Vagrantfile
+Vagrant.configure("2") do |config|
+  vm_suffix = ENV['INSPECT_VM_SUFFIX'] || ''
+  box_name = ENV['VAGRANT_BOX'] || 'generic/ubuntu2204'
+
+  config.vm.define "default#{vm_suffix}" do |vm|
+    vm.vm.box = box_name
+  end
+end
+```
+
+```python
+@task
+def vagrant_example() -> Task:
+    return Task(
+        ...
+        sandbox=SandboxEnvironmentSpec(
+            "vagrant",
+            VagrantSandboxEnvironmentConfig(
+                extra_envs=(("VAGRANT_BOX", "generic/debian12"),),
+            ),
+        ),
+    )
+```
+
+This allows running parallel evals without race conditions, as each sample gets its own isolated environment variables.
+
 ### Testing your Vagrantfile and Sandbox
 
 VM setups can be complex and difficult to debug, especially if your Vagrantfile starts up multiple VMs.
