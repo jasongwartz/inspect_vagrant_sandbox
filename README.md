@@ -142,7 +142,7 @@ def vagrant_example() -> Task:
         sandbox=SandboxEnvironmentSpec(
             "vagrant",
             VagrantSandboxEnvironmentConfig(
-                vagrantfile_env_vars=(("VAGRANT_BOX", "generic/debian12"),),
+                vagrantfile_env_vars={"VAGRANT_BOX": "generic/debian12"},
             ),
         ),
     )

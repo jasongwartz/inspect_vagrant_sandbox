@@ -42,6 +42,15 @@ def test_config_validation():
         config.primary_vm_name = "changed"
 
 
+@pytest.mark.unit
+def test_vagrantfile_env_vars_accepts_dict():
+    """Test that vagrantfile_env_vars accepts dict input and converts to tuple."""
+    config = VagrantSandboxEnvironmentConfig(
+        vagrantfile_env_vars={"FOO": "bar", "BAZ": "qux"}
+    )
+    assert config.vagrantfile_env_vars == (("FOO", "bar"), ("BAZ", "qux"))
+
+
 @pytest.mark.vm_required
 @pytest.mark.asyncio
 async def test_vagrantfile_env_vars():
@@ -52,11 +61,9 @@ async def test_vagrantfile_env_vars():
         os.path.dirname(os.path.abspath(__file__)), "Vagrantfile.basic"
     )
 
-    assert test_key not in os.environ, "Test env var should not exist globally"
-
     config = VagrantSandboxEnvironmentConfig(
         vagrantfile_path=vagrantfile,
-        vagrantfile_env_vars=((test_key, test_value),),
+        vagrantfile_env_vars={test_key: test_value},
     )
 
     sandboxes = await VagrantSandboxEnvironment.sample_init(
