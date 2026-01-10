@@ -44,32 +44,32 @@ def test_config_validation():
 
 @pytest.mark.vm_required
 @pytest.mark.asyncio
-async def test_extra_envs_reach_vagrantfile():
-    """Verify extra_envs values are accessible in Vagrantfile during provisioning."""
+async def test_vagrantfile_env_vars():
+    """Verify vagrantfile_env_vars are passed to the Vagrant subprocess environment."""
+    test_key = "TEST_VAGRANTFILE_ENV"
     test_value = "integration_test_value_12345"
     vagrantfile = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "Vagrantfile.extra_envs"
+        os.path.dirname(os.path.abspath(__file__)), "Vagrantfile.basic"
     )
+
+    assert test_key not in os.environ, "Test env var should not exist globally"
+
     config = VagrantSandboxEnvironmentConfig(
         vagrantfile_path=vagrantfile,
-        extra_envs=(("TEST_EXTRA_ENV", test_value),),
+        vagrantfile_env_vars=((test_key, test_value),),
     )
 
     sandboxes = await VagrantSandboxEnvironment.sample_init(
-        "extra_envs_test",
+        "vagrantfile_env_vars_test",
         config,
-        {"sample_id": "extra_envs_test"},
+        {"sample_id": "vagrantfile_env_vars_test"},
     )
     sandbox = sandboxes["default"]
 
     try:
-        result = await asyncio.wait_for(
-            sandbox.exec(["cat", "/tmp/extra_env_marker"]),
-            timeout=20.0,
-        )
-        assert result.success, f"Failed to read marker: {result.stderr}"
-        assert test_value in result.stdout
+        assert sandbox.vagrant.env.get(test_key) == test_value
+        assert test_key not in os.environ
     finally:
         await VagrantSandboxEnvironment.sample_cleanup(
-            "extra_envs_test", config, sandboxes, interrupted=False
+            "vagrantfile_env_vars_test", config, sandboxes, interrupted=False
         )
