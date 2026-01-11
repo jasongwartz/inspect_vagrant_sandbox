@@ -29,7 +29,7 @@ from inspect_ai.util import (
     trace_action,
 )
 from platformdirs import user_cache_dir
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from vagrant import Vagrant as BaseVagrant
 
 
@@ -333,6 +333,17 @@ class VagrantSandboxEnvironmentConfig(BaseModel, frozen=True):
         default=None,
         description="Name of the VM to use as the 'default' sandbox environment. If None, uses first available VM.",
     )
+    vagrantfile_env_vars: tuple[tuple[str, str], ...] = Field(
+        default=(),
+        description="Environment variables available to the Vagrantfile during vagrant commands. Accepts dict[str, str] or tuple of (key, value) pairs.",
+    )
+
+    @field_validator("vagrantfile_env_vars", mode="before")
+    @classmethod
+    def _convert_dict_to_tuple(cls, v: Any) -> tuple[tuple[str, str], ...]:
+        if isinstance(v, dict):
+            return tuple(v.items())
+        return v
 
 
 async def _run_in_executor(func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
@@ -401,6 +412,7 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         # Set environment variable for Vagrantfile to use
         vagrant_env = os.environ.copy()
         vagrant_env["INSPECT_VM_SUFFIX"] = unique_suffix
+        vagrant_env.update(dict(config.vagrantfile_env_vars))
 
         vagrant = Vagrant(root=str(sandbox_dir), env=vagrant_env)
 
