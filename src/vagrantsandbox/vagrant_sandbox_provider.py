@@ -20,17 +20,42 @@ from typing import (
     override,
 )
 
+from typing import AsyncContextManager
+
 from inspect_ai.util import (
     ExecResult,
     SandboxConnection,
     SandboxEnvironment,
     SandboxEnvironmentConfigType,
+    concurrency,
     sandboxenv,
     trace_action,
 )
 from platformdirs import user_cache_dir
 from pydantic import BaseModel, Field, field_validator
 from vagrant import Vagrant as BaseVagrant
+
+
+# Default max concurrent vagrant up operations.
+# Can be overridden via INSPECT_MAX_VAGRANT_STARTUPS environment variable.
+DEFAULT_MAX_VAGRANT_STARTUPS = 8
+
+
+def _get_max_vagrant_startups() -> int:
+    """Get the maximum number of concurrent vagrant up operations."""
+    return int(os.environ.get("INSPECT_MAX_VAGRANT_STARTUPS", DEFAULT_MAX_VAGRANT_STARTUPS))
+
+
+def _startup_semaphore() -> AsyncContextManager[None]:
+    """Limit concurrent vagrant up operations.
+
+    Vagrant up is resource-intensive (disk I/O, CPU, memory allocation).
+    Running too many in parallel can overwhelm the system and cause failures.
+    This semaphore limits concurrency to prevent resource exhaustion.
+
+    Configure via INSPECT_MAX_VAGRANT_STARTUPS (default: 8).
+    """
+    return concurrency("vagrant-startup", _get_max_vagrant_startups())
 
 
 class SandboxUnrecoverableError(Exception):
@@ -459,7 +484,9 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                 )
 
             # Use our async method to capture stdout/stderr on failure
-            up_result = await vagrant._run_vagrant_command_async(["up"])
+            # Throttle concurrent vagrant up operations to prevent resource exhaustion
+            async with _startup_semaphore():
+                up_result = await vagrant._run_vagrant_command_async(["up"])
             cls.logger.info("All VMs started successfully")
             if up_result["stdout"]:
                 cls.logger.debug(f"Vagrant up stdout: {up_result['stdout']}")
