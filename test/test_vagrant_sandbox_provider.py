@@ -1,9 +1,12 @@
 import asyncio
+import os
 import subprocess
 from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from pathlib import Path
+from inspect_ai.util._concurrency import init_concurrency
+
 from vagrantsandbox.vagrant_sandbox_provider import (
     Vagrant,
     VagrantSandboxEnvironment,
@@ -12,6 +15,9 @@ from vagrantsandbox.vagrant_sandbox_provider import (
     SandboxUnrecoverableError,
     TimeoutConfig,
     _run_in_executor,
+    _get_max_vagrant_startups,
+    _startup_semaphore,
+    DEFAULT_MAX_VAGRANT_STARTUPS,
 )
 
 
@@ -766,3 +772,195 @@ class TestTimeoutHandling:
                 await vagrant._run_vagrant_command_async(["status"], timeout=-5)
 
             assert "timeout must be positive" in str(exc_info.value)
+
+
+class TestVagrantStartupThrottle:
+    """Test the vagrant startup throttle functionality."""
+
+    @pytest.mark.unit
+    def test_get_max_vagrant_startups_default(self):
+        """Test that default value is returned when env var is not set."""
+        with patch.dict(os.environ, {}, clear=True):
+            # Remove the env var if it exists
+            os.environ.pop("INSPECT_MAX_VAGRANT_STARTUPS", None)
+            result = _get_max_vagrant_startups()
+            assert result == DEFAULT_MAX_VAGRANT_STARTUPS
+            assert result == 8  # Verify the actual default value
+
+    @pytest.mark.unit
+    def test_get_max_vagrant_startups_from_env(self):
+        """Test that env var value is used when set."""
+        with patch.dict(os.environ, {"INSPECT_MAX_VAGRANT_STARTUPS": "4"}):
+            result = _get_max_vagrant_startups()
+            assert result == 4
+
+    @pytest.mark.unit
+    def test_get_max_vagrant_startups_custom_values(self):
+        """Test various custom values from env var."""
+        test_values = [1, 2, 10, 16, 32]
+        for value in test_values:
+            with patch.dict(os.environ, {"INSPECT_MAX_VAGRANT_STARTUPS": str(value)}):
+                result = _get_max_vagrant_startups()
+                assert result == value
+
+    @pytest.mark.unit
+    def test_startup_semaphore_returns_context_manager(self):
+        """Test that _startup_semaphore returns an async context manager."""
+        semaphore = _startup_semaphore()
+        # Verify it has async context manager methods
+        assert hasattr(semaphore, "__aenter__")
+        assert hasattr(semaphore, "__aexit__")
+
+    @pytest.mark.unit
+    def test_startup_semaphore_calls_concurrency_with_correct_args(self):
+        """Test that _startup_semaphore calls concurrency with correct name and limit."""
+        with (
+            patch(
+                "vagrantsandbox.vagrant_sandbox_provider.concurrency"
+            ) as mock_concurrency,
+            patch.dict(os.environ, {"INSPECT_MAX_VAGRANT_STARTUPS": "4"}),
+        ):
+            mock_concurrency.return_value = Mock()
+            _startup_semaphore()
+
+            mock_concurrency.assert_called_once_with("vagrant-startup", 4)
+
+    @pytest.mark.unit
+    def test_startup_semaphore_uses_default_when_env_not_set(self):
+        """Test that _startup_semaphore uses default limit when env var is not set."""
+        with patch(
+            "vagrantsandbox.vagrant_sandbox_provider.concurrency"
+        ) as mock_concurrency:
+            mock_concurrency.return_value = Mock()
+            # Ensure env var is not set
+            os.environ.pop("INSPECT_MAX_VAGRANT_STARTUPS", None)
+            _startup_semaphore()
+
+            mock_concurrency.assert_called_once_with(
+                "vagrant-startup", DEFAULT_MAX_VAGRANT_STARTUPS
+            )
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_sample_init_uses_startup_semaphore(
+        self, sample_config, mock_subprocess_patches, mock_sandbox_patches
+    ):
+        """Test that sample_init uses the startup semaphore for vagrant up."""
+        with (
+            patch(
+                "vagrantsandbox.vagrant_sandbox_provider.Vagrant._run_vagrant_command_async"
+            ) as mock_async_vagrant,
+            patch(
+                "vagrantsandbox.vagrant_sandbox_provider._startup_semaphore"
+            ) as mock_semaphore,
+        ):
+            # Setup mock semaphore as async context manager
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__ = AsyncMock(return_value=None)
+            mock_cm.__aexit__ = AsyncMock(return_value=None)
+            mock_semaphore.return_value = mock_cm
+
+            mock_async_vagrant.return_value = {
+                "returncode": 0,
+                "stdout": "VM started",
+                "stderr": "",
+            }
+
+            await VagrantSandboxEnvironment.sample_init("test_task", sample_config, {})
+
+            # Verify the semaphore was used
+            mock_semaphore.assert_called_once()
+            mock_cm.__aenter__.assert_called_once()
+            mock_cm.__aexit__.assert_called_once()
+
+    @pytest.mark.vm_required
+    @pytest.mark.asyncio
+    async def test_startup_throttle_limits_concurrent_vm_startups(self):
+        """Integration test: verify throttle actually limits concurrent vagrant up operations."""
+        # Reset the concurrency registry to clear any cached semaphores from previous tests.
+        # Without this, the "vagrant-startup" semaphore may already exist with a different
+        # concurrency limit, and inspect_ai's concurrency() would reuse it (ignoring our limit).
+        init_concurrency()
+
+        vagrantfile = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "Vagrantfile.basic"
+        )
+
+        # Track concurrent operations
+        active_startups = 0
+        max_concurrent_seen = 0
+        lock = asyncio.Lock()
+
+        # Store original semaphore function
+        original_startup_semaphore = _startup_semaphore
+
+        # Create a wrapper that tracks concurrency
+        def tracking_semaphore():
+            original_cm = original_startup_semaphore()
+
+            class TrackingContextManager:
+                async def __aenter__(self):
+                    nonlocal active_startups, max_concurrent_seen
+                    await original_cm.__aenter__()
+                    async with lock:
+                        active_startups += 1
+                        max_concurrent_seen = max(max_concurrent_seen, active_startups)
+
+                async def __aexit__(self, *args):
+                    nonlocal active_startups
+                    async with lock:
+                        active_startups -= 1
+                    await original_cm.__aexit__(*args)
+
+            return TrackingContextManager()
+
+        # Set throttle to 1 to force sequential startups
+        max_concurrent_limit = 1
+        num_vms = 3
+        sandboxes_list = []
+
+        try:
+            with (
+                patch.dict(
+                    os.environ,
+                    {"INSPECT_MAX_VAGRANT_STARTUPS": str(max_concurrent_limit)},
+                ),
+                patch(
+                    "vagrantsandbox.vagrant_sandbox_provider._startup_semaphore",
+                    tracking_semaphore,
+                ),
+            ):
+
+                async def start_vm(index: int):
+                    config = VagrantSandboxEnvironmentConfig(
+                        vagrantfile_path=vagrantfile
+                    )
+                    sandboxes = await VagrantSandboxEnvironment.sample_init(
+                        f"throttle_test_{index}",
+                        config,
+                        {"sample_id": f"throttle_test_{index}"},
+                    )
+                    return (config, sandboxes)
+
+                # Start multiple VMs concurrently
+                results = await asyncio.gather(*[start_vm(i) for i in range(num_vms)])
+                sandboxes_list = list(results)
+
+            # Verify the throttle worked
+            assert max_concurrent_seen <= max_concurrent_limit, (
+                f"Expected max {max_concurrent_limit} concurrent startups, "
+                f"but saw {max_concurrent_seen}"
+            )
+            assert max_concurrent_seen == max_concurrent_limit, (
+                f"Expected to hit the limit of {max_concurrent_limit}, "
+                f"but max seen was {max_concurrent_seen}"
+            )
+
+        finally:
+            # Clean up all VMs
+            for config, sandboxes in sandboxes_list:
+                await VagrantSandboxEnvironment.sample_cleanup(
+                    "throttle_test", config, sandboxes, interrupted=False
+                )
+            # Reset concurrency registry to not affect other tests
+            init_concurrency()
