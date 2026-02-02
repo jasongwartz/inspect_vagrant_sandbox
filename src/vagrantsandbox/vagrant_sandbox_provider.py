@@ -43,7 +43,9 @@ DEFAULT_MAX_VAGRANT_STARTUPS = 8
 
 def _get_max_vagrant_startups() -> int:
     """Get the maximum number of concurrent vagrant up operations."""
-    return int(os.environ.get("INSPECT_MAX_VAGRANT_STARTUPS", DEFAULT_MAX_VAGRANT_STARTUPS))
+    return int(
+        os.environ.get("INSPECT_MAX_VAGRANT_STARTUPS", DEFAULT_MAX_VAGRANT_STARTUPS)
+    )
 
 
 def _startup_semaphore() -> AsyncContextManager[None]:
