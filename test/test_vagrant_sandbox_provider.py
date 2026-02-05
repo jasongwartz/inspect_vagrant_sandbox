@@ -17,7 +17,6 @@ from vagrantsandbox.vagrant_sandbox_provider import (
     _run_in_executor,
     _get_max_vagrant_startups,
     _startup_semaphore,
-    DEFAULT_MAX_VAGRANT_STARTUPS,
 )
 
 
@@ -538,6 +537,21 @@ class TestVagrantSandboxEnvironmentConfig:
         assert config.vagrantfile_path == "/test/Vagrantfile"
 
 
+class TestDefaultConcurrency:
+    """Test the default_concurrency class method."""
+
+    @pytest.mark.unit
+    def test_default_concurrency_returns_cpu_count(self):
+        """Test that default_concurrency returns default_max_subprocesses value."""
+        with patch(
+            "vagrantsandbox.vagrant_sandbox_provider.default_max_subprocesses",
+            return_value=8,
+        ) as mock_default:
+            result = VagrantSandboxEnvironment.default_concurrency()
+            mock_default.assert_called_once()
+            assert result == 8
+
+
 @pytest.mark.unit
 @pytest.mark.asyncio
 async def test_sample_lifecycle_unit(
@@ -779,13 +793,11 @@ class TestVagrantStartupThrottle:
 
     @pytest.mark.unit
     def test_get_max_vagrant_startups_default(self):
-        """Test that default value is returned when env var is not set."""
-        with patch.dict(os.environ, {}, clear=True):
-            # Remove the env var if it exists
-            os.environ.pop("INSPECT_MAX_VAGRANT_STARTUPS", None)
-            result = _get_max_vagrant_startups()
-            assert result == DEFAULT_MAX_VAGRANT_STARTUPS
-            assert result == 8  # Verify the actual default value
+        """Test that None is returned when env var is not set."""
+        # Remove the env var if it exists
+        os.environ.pop("INSPECT_MAX_VAGRANT_STARTUPS", None)
+        result = _get_max_vagrant_startups()
+        assert result is None
 
     @pytest.mark.unit
     def test_get_max_vagrant_startups_from_env(self):
@@ -826,19 +838,21 @@ class TestVagrantStartupThrottle:
             mock_concurrency.assert_called_once_with("vagrant-startup", 4)
 
     @pytest.mark.unit
-    def test_startup_semaphore_uses_default_when_env_not_set(self):
-        """Test that _startup_semaphore uses default limit when env var is not set."""
+    def test_startup_semaphore_returns_nullcontext_when_env_not_set(self):
+        """Test that _startup_semaphore returns a nullcontext when env var is not set."""
+        from contextlib import nullcontext
+
         with patch(
             "vagrantsandbox.vagrant_sandbox_provider.concurrency"
         ) as mock_concurrency:
-            mock_concurrency.return_value = Mock()
             # Ensure env var is not set
             os.environ.pop("INSPECT_MAX_VAGRANT_STARTUPS", None)
-            _startup_semaphore()
+            result = _startup_semaphore()
 
-            mock_concurrency.assert_called_once_with(
-                "vagrant-startup", DEFAULT_MAX_VAGRANT_STARTUPS
-            )
+            # concurrency() should NOT be called when env var is not set
+            mock_concurrency.assert_not_called()
+            # Should return a nullcontext (no-op context manager)
+            assert isinstance(result, type(nullcontext()))
 
     @pytest.mark.unit
     @pytest.mark.asyncio

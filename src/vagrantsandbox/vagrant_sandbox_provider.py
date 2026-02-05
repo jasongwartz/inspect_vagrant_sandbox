@@ -20,6 +20,7 @@ from typing import (
     override,
 )
 
+from contextlib import nullcontext
 from typing import AsyncContextManager
 
 from inspect_ai.util import (
@@ -31,21 +32,21 @@ from inspect_ai.util import (
     sandboxenv,
     trace_action,
 )
+from inspect_ai.util._subprocess import default_max_subprocesses
 from platformdirs import user_cache_dir
 from pydantic import BaseModel, Field, field_validator
 from vagrant import Vagrant as BaseVagrant
 
 
-# Default max concurrent vagrant up operations.
-# Can be overridden via INSPECT_MAX_VAGRANT_STARTUPS environment variable.
-DEFAULT_MAX_VAGRANT_STARTUPS = 8
+def _get_max_vagrant_startups() -> int | None:
+    """Get the maximum number of concurrent vagrant up operations.
 
-
-def _get_max_vagrant_startups() -> int:
-    """Get the maximum number of concurrent vagrant up operations."""
-    return int(
-        os.environ.get("INSPECT_MAX_VAGRANT_STARTUPS", DEFAULT_MAX_VAGRANT_STARTUPS)
-    )
+    Returns None if not configured (rely on Inspect's sandbox concurrency).
+    """
+    env_value = os.environ.get("INSPECT_MAX_VAGRANT_STARTUPS")
+    if env_value is not None:
+        return int(env_value)
+    return None
 
 
 def _startup_semaphore() -> AsyncContextManager[None]:
@@ -55,9 +56,13 @@ def _startup_semaphore() -> AsyncContextManager[None]:
     Running too many in parallel can overwhelm the system and cause failures.
     This semaphore limits concurrency to prevent resource exhaustion.
 
-    Configure via INSPECT_MAX_VAGRANT_STARTUPS (default: 8).
+    Configure via INSPECT_MAX_VAGRANT_STARTUPS. If not set, relies on
+    Inspect's sandbox concurrency (--max-sandboxes or sample concurrency).
     """
-    return concurrency("vagrant-startup", _get_max_vagrant_startups())
+    max_startups = _get_max_vagrant_startups()
+    if max_startups is None:
+        return nullcontext()
+    return concurrency("vagrant-startup", max_startups)
 
 
 class SandboxUnrecoverableError(Exception):
@@ -395,6 +400,15 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         self.vagrant = vagrant
         self.sandbox_dir = sandbox_dir
         self.vm_name = vm_name
+
+    @classmethod
+    def default_concurrency(cls) -> int | None:
+        """Default concurrent sandbox limit for vagrant environments.
+
+        VMs are resource-intensive, so limit to cpu_count().
+        Can be overridden via --max-sandboxes flag.
+        """
+        return default_max_subprocesses()
 
     @classmethod
     async def task_init(

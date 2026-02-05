@@ -150,17 +150,16 @@ def vagrant_example() -> Task:
 
 ### Concurrent VM Startup Throttling
 
-When running many samples in parallel, the sandbox provider throttles concurrent `vagrant up` operations to prevent overwhelming system resources (CPU, memory, disk I/O). By default, a maximum of 8 VMs can start simultaneously.
+Inspect controls sandbox concurrency via the `--max-sandboxes` flag or sample concurrency settings. By default, the vagrant sandbox provider limits concurrent sandboxes to `os.cpu_count()` (since VMs are resource-intensive).
 
-You can adjust this limit via the `INSPECT_MAX_VAGRANT_STARTUPS` environment variable:
+For additional control over `vagrant up` operations specifically, you can set the `INSPECT_MAX_VAGRANT_STARTUPS` environment variable. This is useful if you want to throttle VM startup operations independently from the overall sandbox limit:
 
 ```bash
 # Allow only 4 concurrent VM startups (useful for memory-constrained systems)
 export INSPECT_MAX_VAGRANT_STARTUPS=4
-
-# Allow more concurrent startups (for powerful machines with many cores)
-export INSPECT_MAX_VAGRANT_STARTUPS=16
 ```
+
+If `INSPECT_MAX_VAGRANT_STARTUPS` is not set, Inspect's sandbox concurrency (`--max-sandboxes`) controls the parallelism.
 
 Note that this only throttles the `vagrant up` operation. Once VMs are running, other operations (SSH commands, file transfers) can run in parallel following other Inspect concurrency settings.
 
