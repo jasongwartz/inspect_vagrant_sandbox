@@ -20,17 +20,49 @@ from typing import (
     override,
 )
 
+from contextlib import nullcontext
+from typing import AsyncContextManager
+
 from inspect_ai.util import (
     ExecResult,
     SandboxConnection,
     SandboxEnvironment,
     SandboxEnvironmentConfigType,
+    concurrency,
     sandboxenv,
     trace_action,
 )
+from inspect_ai.util._subprocess import default_max_subprocesses
 from platformdirs import user_cache_dir
 from pydantic import BaseModel, Field, field_validator
 from vagrant import Vagrant as BaseVagrant
+
+
+def _get_max_vagrant_startups() -> int | None:
+    """Get the maximum number of concurrent vagrant up operations.
+
+    Returns None if not configured (rely on Inspect's sandbox concurrency).
+    """
+    env_value = os.environ.get("INSPECT_MAX_VAGRANT_STARTUPS")
+    if env_value is not None:
+        return int(env_value)
+    return None
+
+
+def _startup_semaphore() -> AsyncContextManager[None]:
+    """Limit concurrent vagrant up operations.
+
+    Vagrant up is resource-intensive (disk I/O, CPU, memory allocation).
+    Running too many in parallel can overwhelm the system and cause failures.
+    This semaphore limits concurrency to prevent resource exhaustion.
+
+    Configure via INSPECT_MAX_VAGRANT_STARTUPS. If not set, relies on
+    Inspect's sandbox concurrency (--max-sandboxes or sample concurrency).
+    """
+    max_startups = _get_max_vagrant_startups()
+    if max_startups is None:
+        return nullcontext()
+    return concurrency("vagrant-startup", max_startups)
 
 
 class SandboxUnrecoverableError(Exception):
@@ -370,6 +402,15 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         self.vm_name = vm_name
 
     @classmethod
+    def default_concurrency(cls) -> int | None:
+        """Default concurrent sandbox limit for vagrant environments.
+
+        VMs are resource-intensive, so limit to cpu_count().
+        Can be overridden via --max-sandboxes flag.
+        """
+        return default_max_subprocesses()
+
+    @classmethod
     async def task_init(
         cls, task_name: str, config: SandboxEnvironmentConfigType | None
     ) -> None:
@@ -459,7 +500,9 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                 )
 
             # Use our async method to capture stdout/stderr on failure
-            up_result = await vagrant._run_vagrant_command_async(["up"])
+            # Throttle concurrent vagrant up operations to prevent resource exhaustion
+            async with _startup_semaphore():
+                up_result = await vagrant._run_vagrant_command_async(["up"])
             cls.logger.info("All VMs started successfully")
             if up_result["stdout"]:
                 cls.logger.debug(f"Vagrant up stdout: {up_result['stdout']}")
