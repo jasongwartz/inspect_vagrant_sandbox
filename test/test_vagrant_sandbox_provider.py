@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import os
 import subprocess
 from unittest.mock import AsyncMock, Mock, patch
@@ -387,6 +388,56 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_exec_forwards_env(self, mock_vagrant, mock_sandbox_dir):
+        """Test that env vars are exported before the command."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
+
+        await env.exec(["printenv", "MY_VAR"], env={"MY_VAR": "my value"})
+
+        command = mock_vagrant.ssh.call_args[1]["command"]
+        assert command == "export MY_VAR='my value'; printenv MY_VAR"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_forwards_cwd(self, mock_vagrant, mock_sandbox_dir):
+        """Test that cwd is applied via cd before the command."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
+
+        await env.exec(["ls"], cwd="/usr/bin")
+
+        command = mock_vagrant.ssh.call_args[1]["command"]
+        assert command == "cd /usr/bin && ls"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_forwards_user(self, mock_vagrant, mock_sandbox_dir):
+        """Test that user is applied via sudo, wrapping cwd/env handling."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
+
+        await env.exec(["whoami"], user="root", cwd="/tmp")
+
+        command = mock_vagrant.ssh.call_args[1]["command"]
+        assert command == "sudo -H -n -u root sh -c 'cd /tmp && whoami'"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_permission_denied(self, mock_vagrant, mock_sandbox_dir):
+        """Test that executing a non-executable file raises PermissionError."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {
+            "returncode": 126,
+            "stdout": "",
+            "stderr": "sh: 1: /etc/passwd: Permission denied",
+        }
+
+        with pytest.raises(PermissionError):
+            await env.exec(["/etc/passwd"])
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_write_file_success(self, mock_vagrant, mock_sandbox_dir):
         """Test successful file writing."""
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
@@ -396,17 +447,52 @@ class TestVagrantSandboxEnvironment:
 
         mock_vagrant.ssh.assert_called_once()
         call_args = mock_vagrant.ssh.call_args
-        assert "printf %s 'test content' > /tmp/test.txt" in call_args[1]["command"]
+        # Content is transferred base64-encoded via stdin (binary-safe), and
+        # parent directories are created first
+        assert "mkdir -p -- /tmp && base64 -d > /tmp/test.txt" in (
+            call_args[1]["command"]
+        )
+        assert call_args[1]["input"] == base64.b64encode(b"test content").decode(
+            "ascii"
+        )
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_write_file_failure(self, mock_vagrant, mock_sandbox_dir):
-        """Test file writing failure."""
+    async def test_write_file_permission_denied(self, mock_vagrant, mock_sandbox_dir):
+        """Test that write failures from missing permissions raise PermissionError."""
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
         mock_vagrant.ssh.return_value = {
             "returncode": 1,
             "stdout": "",
-            "stderr": "permission denied",
+            "stderr": "sh: 1: cannot create /root/test.txt: Permission denied",
+        }
+
+        with pytest.raises(PermissionError):
+            await env.write_file("/root/test.txt", "test content")
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_write_file_is_directory(self, mock_vagrant, mock_sandbox_dir):
+        """Test that writing to a directory raises IsADirectoryError."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {
+            "returncode": 1,
+            "stdout": "",
+            "stderr": "sh: 1: cannot create /tmp/somedir: Is a directory",
+        }
+
+        with pytest.raises(IsADirectoryError):
+            await env.write_file("/tmp/somedir", "test content")
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_write_file_unmapped_failure(self, mock_vagrant, mock_sandbox_dir):
+        """Test that unrecognized write failures raise CalledProcessError."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {
+            "returncode": 1,
+            "stdout": "",
+            "stderr": "something inexplicable went wrong",
         }
 
         with pytest.raises(subprocess.CalledProcessError):
@@ -415,13 +501,15 @@ class TestVagrantSandboxEnvironment:
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_write_file_bytes_content(self, mock_vagrant, mock_sandbox_dir):
-        """Test writing bytes content to file."""
+        """Test writing bytes content to file, including non-UTF-8 bytes."""
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
         mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
 
-        await env.write_file("/tmp/test.txt", b"test content")
+        await env.write_file("/tmp/test.txt", b"\xc3\x28")  # invalid UTF-8
 
         mock_vagrant.ssh.assert_called_once()
+        call_args = mock_vagrant.ssh.call_args
+        assert call_args[1]["input"] == base64.b64encode(b"\xc3\x28").decode("ascii")
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -430,26 +518,58 @@ class TestVagrantSandboxEnvironment:
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
         mock_vagrant.ssh.return_value = {
             "returncode": 0,
-            "stdout": "file content",
+            "stdout": base64.b64encode(b"file content").decode("ascii"),
             "stderr": "",
         }
 
         result = await env.read_file("/tmp/test.txt")
 
         assert result == "file content"
-        mock_vagrant.ssh.assert_called_once_with(
-            vm_name=None, command="cat /tmp/test.txt"
-        )
+        mock_vagrant.ssh.assert_called_once()
+        command = mock_vagrant.ssh.call_args[1]["command"]
+        # Content is transferred base64-encoded (binary-safe), after a size check
+        assert "base64 -- /tmp/test.txt" in command
+        assert "stat -c %s -- /tmp/test.txt" in command
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_read_file_failure(self, mock_vagrant, mock_sandbox_dir):
-        """Test file reading failure."""
+    async def test_read_file_binary(self, mock_vagrant, mock_sandbox_dir):
+        """Test reading non-UTF-8 binary content with text=False."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        binary_content = b"\xc3\x28"  # invalid UTF-8
+        mock_vagrant.ssh.return_value = {
+            "returncode": 0,
+            "stdout": base64.b64encode(binary_content).decode("ascii"),
+            "stderr": "",
+        }
+
+        result = await env.read_file("/tmp/test.bin", text=False)
+
+        assert result == binary_content
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_read_file_not_found(self, mock_vagrant, mock_sandbox_dir):
+        """Test that reading a missing file raises FileNotFoundError."""
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
         mock_vagrant.ssh.return_value = {
             "returncode": 1,
             "stdout": "",
-            "stderr": "file not found",
+            "stderr": "stat: cannot statx '/missing/file.txt': No such file or directory",
+        }
+
+        with pytest.raises(FileNotFoundError):
+            await env.read_file("/missing/file.txt")
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_read_file_unmapped_failure(self, mock_vagrant, mock_sandbox_dir):
+        """Test that unrecognized read failures raise CalledProcessError."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {
+            "returncode": 1,
+            "stdout": "",
+            "stderr": "something inexplicable went wrong",
         }
 
         with pytest.raises(subprocess.CalledProcessError):
