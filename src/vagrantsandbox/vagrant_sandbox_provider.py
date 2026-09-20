@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import shlex
 import shutil
@@ -113,6 +114,26 @@ def get_sandbox_cache_dir() -> Path:
     return base_dir
 
 
+SANDBOX_OWNER_FILE_NAME = ".inspect-vagrant-owner.json"
+
+# Identity of this eval process, recorded in each sandbox directory it creates
+# (see SandboxDirectory.create). The sandbox cache directory is shared between
+# concurrent `inspect eval` processes, so cleanup sweeps use this to tell this
+# run's sandboxes apart from another run's. The random component guards
+# against PID reuse by an earlier crashed run.
+_RUN_OWNER_ID = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
+
+
+def _read_sandbox_owner(path: Path) -> str | None:
+    """Read the owner id recorded in a sandbox directory, if present."""
+    try:
+        data = json.loads((path / SANDBOX_OWNER_FILE_NAME).read_text())
+    except (OSError, ValueError):
+        return None
+    owner = data.get("owner")
+    return owner if isinstance(owner, str) else None
+
+
 class SandboxDirectory:
     """
     Manages sandbox directories stored in user cache.
@@ -141,6 +162,14 @@ class SandboxDirectory:
 
         path = base_dir / subdir_name
         await asyncio.to_thread(path.mkdir, exist_ok=True)
+
+        # Record which process created this sandbox, so that cleanup sweeps
+        # only destroy their own sandboxes and a human inspecting a stray
+        # directory can see where it came from.
+        await asyncio.to_thread(
+            (path / SANDBOX_OWNER_FILE_NAME).write_text,
+            json.dumps({"owner": _RUN_OWNER_ID, "pid": os.getpid()}) + "\n",
+        )
 
         cls.logger.debug(f"Created sandbox directory: {path}")
         return cls(path)
@@ -656,12 +685,31 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             return
 
         if cleanup:
-            cls.logger.info(f"Cleaning up {len(directories)} sandbox(es)")
-            for path in directories:
-                try:
-                    await cleanup_sandbox_with_vms(path)
-                except Exception as e:
-                    cls.logger.error(f"Failed to clean up {path}: {e}")
+            # The cache directory is shared between concurrent `inspect eval`
+            # processes, so only sweep sandboxes this process created
+            # (leftovers from samples whose own cleanup did not complete).
+            # Sandboxes owned by other runs - including strays from earlier
+            # crashed runs - are left alone and reported instead;
+            # `inspect sandbox cleanup vagrant` clears them out.
+            own_directories = [
+                path
+                for path in directories
+                if await asyncio.to_thread(_read_sandbox_owner, path) == _RUN_OWNER_ID
+            ]
+            if own_directories:
+                cls.logger.info(f"Cleaning up {len(own_directories)} sandbox(es)")
+                for path in own_directories:
+                    try:
+                        await cleanup_sandbox_with_vms(path)
+                    except Exception as e:
+                        cls.logger.error(f"Failed to clean up {path}: {e}")
+            skipped = len(directories) - len(own_directories)
+            if skipped:
+                cls.logger.info(
+                    f"Left {skipped} sandbox(es) belonging to other eval runs "
+                    f"in {cache_dir}; remove strays with: "
+                    "inspect sandbox cleanup vagrant"
+                )
         else:
             cls.logger.info(f"Sandbox cache directory: {cache_dir}")
             for path in directories:
