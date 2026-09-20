@@ -276,6 +276,58 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_sample_init_cleans_up_after_failure(
+        self, sample_config, mock_sandbox_patches
+    ):
+        """A failed startup must not leave its VM and directory behind."""
+        with (
+            patch(
+                "vagrantsandbox.vagrant_sandbox_provider.Vagrant._run_vagrant_command_async"
+            ) as mock_async_vagrant,
+            patch(
+                "vagrantsandbox.vagrant_sandbox_provider.cleanup_sandbox_with_vms"
+            ) as mock_cleanup,
+        ):
+            mock_async_vagrant.return_value = {
+                "returncode": 1,
+                "stdout": "",
+                "stderr": "VM failed to start",
+            }
+            mock_cleanup.return_value = None
+
+            with pytest.raises(subprocess.CalledProcessError):
+                await VagrantSandboxEnvironment.sample_init(
+                    "test_task", sample_config, {}
+                )
+
+            mock_cleanup.assert_awaited_once()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_sample_init_cleans_up_after_timeout(
+        self, sample_config, mock_sandbox_patches
+    ):
+        """Cleanup also runs for failures that aren't CalledProcessError."""
+        with (
+            patch(
+                "vagrantsandbox.vagrant_sandbox_provider.Vagrant._run_vagrant_command_async"
+            ) as mock_async_vagrant,
+            patch(
+                "vagrantsandbox.vagrant_sandbox_provider.cleanup_sandbox_with_vms"
+            ) as mock_cleanup,
+        ):
+            mock_async_vagrant.side_effect = TimeoutError("vagrant up timed out")
+            mock_cleanup.return_value = None
+
+            with pytest.raises(TimeoutError):
+                await VagrantSandboxEnvironment.sample_init(
+                    "test_task", sample_config, {}
+                )
+
+            mock_cleanup.assert_awaited_once()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_sample_cleanup_success(
         self, mock_vagrant, mock_sandbox_dir, mock_subprocess_patches
     ):
