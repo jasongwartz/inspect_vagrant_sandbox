@@ -35,7 +35,7 @@ from inspect_ai.util import (
 from inspect_ai.util._subprocess import default_max_subprocesses
 from platformdirs import user_cache_dir
 from pydantic import BaseModel, Field, field_validator
-from vagrant import Vagrant as BaseVagrant
+from vagrant import Status, Vagrant as BaseVagrant
 
 
 def _get_max_vagrant_startups() -> int | None:
@@ -220,17 +220,25 @@ class Vagrant(BaseVagrant):
     logger = getLogger(__name__)
 
     async def get_vm_names(self) -> list[str | None]:
-        """Get list of VM names defined in the Vagrantfile."""
+        """Get list of VM names defined in the Vagrantfile.
+
+        python-vagrant's ``status()`` returns a list of ``Status`` namedtuples
+        with fields ``(name, state, provider)`` - one per machine defined in
+        the Vagrantfile, whether or not it has been created yet.
+        """
         try:
             # Use python-vagrant's built-in status method
-            status_info = await _run_in_executor(self.status)
-            vm_names = [vm["name"] for vm in status_info]
-            self.logger.debug(f"get_vm_names status_info: {status_info}")
-            self.logger.debug(f"get_vm_names extracted names: {vm_names}")
-            return vm_names
-        except Exception as e:
-            self.logger.debug(f"get_vm_names failed: {e}")
+            status_info: list[Status] = await _run_in_executor(self.status)
+        except (subprocess.SubprocessError, OSError) as e:
+            self.logger.warning(
+                f"'vagrant status' failed while discovering VM names: {e}. "
+                "Falling back to single-VM mode."
+            )
             return []
+        vm_names: list[str | None] = [vm.name for vm in status_info]
+        self.logger.debug(f"get_vm_names status_info: {status_info}")
+        self.logger.debug(f"get_vm_names extracted names: {vm_names}")
+        return vm_names
 
     async def _run_vagrant_command_async(
         self,
@@ -458,18 +466,14 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         vagrant = Vagrant(root=str(sandbox_dir), env=vagrant_env)
 
         # Get available VMs before starting them
-        try:
-            vm_names = await vagrant.get_vm_names()
-            cls.logger.debug(f"Discovered VMs in Vagrantfile: {vm_names}")
-        except Exception as e:
-            cls.logger.error(
-                f"Failed to get VM names: {e}. Assuming single-VM Vagrantfile."
-            )
-            vm_names = []
+        vm_names = await vagrant.get_vm_names()
+        cls.logger.debug(f"Discovered VMs in Vagrantfile: {vm_names}")
 
         # If no VMs found, assume single-VM Vagrantfile
         if not vm_names:
-            cls.logger.debug("No VMs discovered, assuming single-VM Vagrantfile")
+            cls.logger.warning(
+                "No VMs discovered via 'vagrant status', assuming single-VM Vagrantfile"
+            )
             vm_names = [None]  # None means default/single VM
 
         try:
@@ -551,22 +555,33 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
 
         sandboxes: dict[str, SandboxEnvironment] = {}
 
+        def base_vm_name(vm_name: str) -> str:
+            """Strip the per-sample unique suffix from a discovered VM name.
+
+            VM names reported by 'vagrant status' include the unique suffix
+            appended by the Vagrantfile (via INSPECT_VM_SUFFIX), e.g.
+            'attacker-sample01-abc123'. Sandbox dict keys and primary VM
+            matching use the base name from the Vagrantfile ('attacker') so
+            that eval code can reference sandboxes by a stable name.
+            """
+            return vm_name.removesuffix(unique_suffix)
+
         # Determine which VM should be the default
         # The primary_vm_name from config needs to be matched with the actual VM names (which include suffix)
         primary_vm_base = config.primary_vm_name
         primary_vm = None
 
         if primary_vm_base:
-            # Find VM that starts with the base name (handles suffix)
+            # Find VM whose base name (suffix stripped) matches
             for vm_name in vm_names:
-                if vm_name and vm_name.startswith(primary_vm_base):
+                if vm_name and base_vm_name(vm_name) == primary_vm_base:
                     primary_vm = vm_name
                     break
 
             if not primary_vm:
-                available_vms = [vm for vm in vm_names if vm is not None]
+                available_vms = [base_vm_name(vm) for vm in vm_names if vm is not None]
                 cls.logger.warning(
-                    f"Primary VM starting with '{primary_vm_base}' not found. "
+                    f"Primary VM '{primary_vm_base}' not found. "
                     f"Available VMs: {available_vms}. Using first available VM."
                 )
                 primary_vm = vm_names[0] if vm_names else None
@@ -575,18 +590,22 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
 
         # Create sandbox environments for each VM
         cls.logger.debug(f"Creating sandbox environments. Primary VM: {primary_vm}")
+        primary_env: SandboxEnvironment | None = None
         for vm_name in vm_names:
             env = VagrantSandboxEnvironment(sandbox_dir, vagrant, vm_name)
             cls.logger.debug(f"Created environment for VM: {vm_name}")
 
-            # The primary VM becomes "default"
-            if vm_name == primary_vm:
-                sandboxes["default"] = env
-                cls.logger.debug(f"Set '{vm_name}' as default sandbox environment")
-
-            # Also add by VM name if it's not None (multi-VM case)
+            # Add by base VM name if it's not None (multi-VM case)
             if vm_name is not None:
-                sandboxes[vm_name] = env
+                sandboxes[base_vm_name(vm_name)] = env
+
+            if vm_name == primary_vm:
+                primary_env = env
+
+        # The primary VM becomes "default"
+        if primary_env is not None:
+            sandboxes["default"] = primary_env
+            cls.logger.debug(f"Set '{primary_vm}' as default sandbox environment")
 
         # Ensure we always have a "default" sandbox
         if "default" not in sandboxes and sandboxes:
