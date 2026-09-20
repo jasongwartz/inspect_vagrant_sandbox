@@ -547,7 +547,13 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             except Exception as global_error:
                 cls.logger.error(f"Could not get global status: {global_error}")
 
+            await cls._discard_failed_sandbox(sandbox_dir)
             raise e
+        except BaseException:
+            # Timeouts, cancellation, anything else: the sample never starts, so
+            # Inspect will not call sample_cleanup for it.
+            await cls._discard_failed_sandbox(sandbox_dir)
+            raise
 
         sandboxes: dict[str, SandboxEnvironment] = {}
 
@@ -604,6 +610,24 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             return sandboxes
 
         return reorder_default_first(sandboxes)
+
+    @classmethod
+    async def _discard_failed_sandbox(cls, sandbox_dir: SandboxDirectory) -> None:
+        """Destroy a sandbox whose startup failed.
+
+        Inspect only calls `sample_cleanup` for samples that started, so without
+        this a failed `vagrant up` leaves the (possibly half-created) VM and its
+        directory behind for the user to find with `vagrant global-status`.
+        """
+        cls.logger.info(f"Cleaning up sandbox after failed startup: {sandbox_dir.path}")
+        try:
+            await cleanup_sandbox_with_vms(sandbox_dir.path)
+        except Exception as cleanup_error:
+            cls.logger.error(
+                f"Failed to clean up {sandbox_dir.path} after a failed startup: "
+                f"{cleanup_error}. Clean up manually with: "
+                "inspect sandbox cleanup vagrant"
+            )
 
     @classmethod
     @override
