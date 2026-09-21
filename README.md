@@ -40,8 +40,8 @@ You'll need to create a `Vagrantfile` in the directory from which you'll invoke 
 
 ```ruby
 Vagrant.configure("2") do |config|
-    # Ubuntu base image ("box") for arm64 macOS devices
-    config.vm.box = "perk/ubuntu-2204-arm64"
+    # Ubuntu base image ("box")
+    config.vm.box = "cloud-image/ubuntu-24.04"
 
     config.vm.provider "qemu" do |qe|
         # Default is:
@@ -126,7 +126,7 @@ You can pass environment variables to the Vagrant subprocess using `vagrantfile_
 # Vagrantfile
 Vagrant.configure("2") do |config|
   vm_suffix = ENV['INSPECT_VM_SUFFIX'] || ''
-  box_name = ENV['VAGRANT_BOX'] || 'generic/ubuntu2204'
+  box_name = ENV['VAGRANT_BOX'] || 'cloud-image/ubuntu-24.04'
 
   config.vm.define "default#{vm_suffix}" do |vm|
     vm.vm.box = box_name
