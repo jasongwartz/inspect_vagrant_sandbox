@@ -476,7 +476,7 @@ dev = [
 requires-dist = [
     { name = "inspect-ai", specifier = ">=0.3.123" },
     { name = "platformdirs", specifier = ">=4.0.0" },
-    { name = "python-vagrant", specifier = ">=1.0.0" },
+    { name = "python-vagrant", specifier = ">=1.0.0,<2" },
 ]
 
 [package.metadata.requires-dev]
