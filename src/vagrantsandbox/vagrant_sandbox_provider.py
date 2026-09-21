@@ -790,7 +790,7 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         elif isinstance(contents, str):
             contents_str = contents
         else:
-            assert_never(contents)  # type: ignore[arg-type]
+            assert_never(contents)
 
         command = f"printf %s {shlex.quote(contents_str)} > {shlex.quote(file)}"
         result = await self.vagrant.ssh(vm_name=self.vm_name, command=command)

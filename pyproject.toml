@@ -37,4 +37,5 @@ files = ["src"]
 exclude = [
     "^__init__\\.py$",
 ]
+warn_unused_ignores = true
 
