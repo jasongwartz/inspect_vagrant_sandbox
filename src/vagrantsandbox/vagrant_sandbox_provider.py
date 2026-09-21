@@ -673,9 +673,17 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                         ["destroy", "-f"]
                     )
                     if result["returncode"] != 0:
+                        # Keep the directory: `.vagrant` inside it is the only
+                        # handle on the VM that is still running, and without it
+                        # neither `inspect sandbox cleanup vagrant` nor a manual
+                        # `vagrant destroy` can reach it.
                         cls.logger.warning(
-                            f"vagrant destroy returned {result['returncode']}: {result['stderr']}"
+                            f"vagrant destroy returned {result['returncode']}: "
+                            f"{result['stderr']}. Keeping {env.sandbox_dir.path} so "
+                            "the VM can still be destroyed; retry with: "
+                            "inspect sandbox cleanup vagrant"
                         )
+                        continue
 
                     await env.sandbox_dir.cleanup()
 

@@ -352,6 +352,25 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_sample_cleanup_keeps_directory_when_destroy_fails(
+        self, mock_vagrant, mock_sandbox_dir, mock_subprocess_patches
+    ):
+        """The directory is the only handle on a VM that failed to be destroyed."""
+        mock_sandbox_dir.path.exists = Mock(return_value=True)
+        mock_vagrant._run_vagrant_command_async = AsyncMock(
+            return_value={"returncode": 1, "stdout": "", "stderr": "destroy failed"}
+        )
+
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+
+        await VagrantSandboxEnvironment.sample_cleanup(
+            "test_task", None, {"default": env}, interrupted=False
+        )
+
+        mock_sandbox_dir.cleanup.assert_not_called()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_sample_cleanup_interrupted(self, mock_vagrant, mock_sandbox_dir):
         """Test cleanup when interrupted (should not destroy VM)."""
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
