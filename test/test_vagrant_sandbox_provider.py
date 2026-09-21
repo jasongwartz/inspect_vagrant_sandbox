@@ -449,8 +449,8 @@ class TestVagrantSandboxEnvironment:
         call_args = mock_vagrant.ssh.call_args
         # Content is transferred base64-encoded via stdin (binary-safe), and
         # parent directories are created first
-        assert "mkdir -p -- /tmp && base64 -d > /tmp/test.txt" in (
-            call_args[1]["command"]
+        assert (
+            "mkdir -p -- /tmp && base64 -d > /tmp/test.txt" in (call_args[1]["command"])
         )
         assert call_args[1]["input"] == base64.b64encode(b"test content").decode(
             "ascii"

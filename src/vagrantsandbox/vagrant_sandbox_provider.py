@@ -768,9 +768,7 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                 and "permission denied"
                 in (exec_result.stdout + exec_result.stderr).lower()
             ):
-                raise PermissionError(
-                    f"Permission denied executing command: {command}"
-                )
+                raise PermissionError(f"Permission denied executing command: {command}")
             verify_exec_result_size(exec_result)
             return exec_result
 
