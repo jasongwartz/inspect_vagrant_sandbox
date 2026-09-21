@@ -802,9 +802,11 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         if cwd is not None:
             command = f"cd {shlex.quote(cwd)} && {command}"
         if user is not None:
-            # Vagrant base boxes grant the SSH user passwordless sudo. Wrap the
-            # command in `sh -c` so the cwd/env handling above also runs as the
-            # target user. `-n` fails fast rather than prompting for a password.
+            # Vagrant's base box guidelines require passwordless sudo for the
+            # SSH user, and mainstream boxes comply. Wrap the command in `sh -c`
+            # so the cwd/env handling above also runs as the target user. `-n`
+            # makes a non-compliant box fail fast ("sudo: a password is
+            # required" on stderr) instead of hanging on a password prompt.
             command = f"sudo -H -n -u {shlex.quote(user)} sh -c {shlex.quote(command)}"
         with trace_action(
             self.logger,
