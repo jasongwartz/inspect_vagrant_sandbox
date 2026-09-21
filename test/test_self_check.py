@@ -53,9 +53,20 @@ async def test_self_check() -> None:
             interrupted=False,
         )
 
-    failures = [
-        f"{test_name}: {result}"
+    failures = {
+        test_name: " ".join(str(result).split())
         for test_name, result in results.items()
         if result is not True
-    ]
-    assert not failures, "self_check failures:\n" + "\n".join(failures)
+    }
+    if failures:
+        # Keep the report readable: one line per failing check, truncated —
+        # some failure reprs embed the check's full (multi-megabyte) output.
+        lines = [
+            f"  {name}: {message[:200]}{'…' if len(message) > 200 else ''}"
+            for name, message in failures.items()
+        ]
+        pytest.fail(
+            f"{len(failures)}/{len(results)} self_check checks failed:\n"
+            + "\n".join(lines),
+            pytrace=False,
+        )
