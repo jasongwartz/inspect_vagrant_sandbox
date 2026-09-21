@@ -5,6 +5,7 @@ from inspect_ai.scorer import includes
 from inspect_ai.solver import basic_agent
 from inspect_ai.tool import bash
 
+import shutil
 import sys
 import os
 import pytest
@@ -13,7 +14,12 @@ from inspect_ai.util import SandboxEnvironmentSpec
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from vagrantsandbox.vagrant_sandbox_provider import (
+    Vagrant,
     VagrantSandboxEnvironmentConfig,
+)
+
+MULTI_VAGRANTFILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "Vagrantfile.multi"
 )
 
 
@@ -43,6 +49,23 @@ def multi_vm_task() -> Task:
             ),
         ),
     )
+
+
+@pytest.mark.vm_required
+@pytest.mark.asyncio
+async def test_multi_vm_name_discovery(tmp_path):
+    """Regression test for issue #27: get_vm_names() must report every VM.
+
+    Only needs 'vagrant status' - no VM is booted, so this is fast.
+    """
+    shutil.copy2(MULTI_VAGRANTFILE, tmp_path / "Vagrantfile")
+    vagrant = Vagrant(
+        root=str(tmp_path),
+        env={**os.environ, "INSPECT_VM_SUFFIX": "-vmdisco"},
+    )
+
+    vm_names = await vagrant.get_vm_names()
+    assert vm_names == ["target-vmdisco", "attacker-vmdisco"]
 
 
 @pytest.mark.vm_required
