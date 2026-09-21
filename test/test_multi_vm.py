@@ -170,8 +170,11 @@ def test_multi_vm_config():
     assert bash_outputs[0].error is None, (
         f"bash tool call failed: {bash_outputs[0].error}"
     )
-    # `hostname` must have executed on the primary (attacker) VM
-    assert bash_outputs[0].text.strip() == "attacker", (
+    # `hostname` must have executed on the primary (attacker) VM. Compare
+    # only the last line: under libvirt, vagrant/fog warnings leak into the
+    # output ahead of the command's stdout (host noise in guest output — the
+    # provider bug the self_check stderr-isolation fix addresses).
+    assert bash_outputs[0].text.strip().splitlines()[-1] == "attacker", (
         f"expected `hostname` output 'attacker', got: {bash_outputs[0].text!r}"
     )
 
