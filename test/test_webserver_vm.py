@@ -1,7 +1,7 @@
 from textwrap import dedent
 from inspect_ai import Task, eval, task
 from inspect_ai.dataset import Sample
-from inspect_ai.model import ModelOutput, get_model
+from inspect_ai.model import ChatMessageTool, ModelOutput, get_model
 from inspect_ai.scorer import includes
 from inspect_ai.solver import basic_agent
 from inspect_ai.tool import bash, python
@@ -92,6 +92,24 @@ def test_webserver_vm_config():
     assert len(eval_logs) == 1
     assert eval_logs[0]
     assert eval_logs[0].error is None
+    assert eval_logs[0].status == "success"
+    assert eval_logs[0].samples
+    for sample in eval_logs[0].samples:
+        assert sample.error is None, f"sample {sample.id} errored: {sample.error}"
+    sample = eval_logs[0].samples[0]
+    bash_outputs = [
+        x
+        for x in sample.messages
+        if isinstance(x, ChatMessageTool) and x.function == "bash"
+    ]
+    assert bash_outputs, "no bash tool output recorded in sample messages"
+    for msg in bash_outputs:
+        assert msg.error is None, f"bash tool call failed: {msg.error}"
+    # The curl against the victim VM must have returned the flag
+    assert any("CTF{web_server_flag_found}" in msg.text for msg in bash_outputs), (
+        "flag never appeared in bash tool output; "
+        f"outputs were: {[msg.text for msg in bash_outputs]!r}"
+    )
 
 
 if __name__ == "__main__":
