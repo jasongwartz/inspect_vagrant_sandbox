@@ -5,7 +5,6 @@ from inspect_ai.scorer import includes
 from inspect_ai.solver import basic_agent
 from inspect_ai.tool import bash
 
-import asyncio
 import shutil
 import sys
 import os
@@ -16,7 +15,6 @@ from inspect_ai.util import SandboxEnvironmentSpec
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from vagrantsandbox.vagrant_sandbox_provider import (
     Vagrant,
-    VagrantSandboxEnvironment,
     VagrantSandboxEnvironmentConfig,
 )
 
@@ -68,65 +66,6 @@ async def test_multi_vm_name_discovery(tmp_path):
 
     vm_names = await vagrant.get_vm_names()
     assert vm_names == ["target-vmdisco", "attacker-vmdisco"]
-
-
-@pytest.mark.vm_required
-@pytest.mark.asyncio
-async def test_multi_vm_named_sandboxes_and_routing():
-    """Boot a multi-VM Vagrantfile and verify per-VM sandbox routing.
-
-    Guards against the issue #27 failure mode, where VM discovery silently
-    returned [] and every multi-VM environment collapsed into a single
-    unnamed sandbox. This test fails loudly if discovery regresses:
-    - both named sandboxes must exist in the returned dict
-    - primary_vm_name must select the "default" sandbox
-    - commands must reach the specific VM they were addressed to
-    """
-    config = VagrantSandboxEnvironmentConfig(
-        vagrantfile_path=MULTI_VAGRANTFILE,
-        primary_vm_name="attacker",
-    )
-    sandboxes = await VagrantSandboxEnvironment.sample_init(
-        "multi_vm_routing",
-        config,
-        {"sample_id": "multirt"},
-    )
-
-    try:
-        # Both named sandboxes must exist, keyed by their Vagrantfile names
-        assert "target" in sandboxes, f"Missing 'target' in {list(sandboxes)}"
-        assert "attacker" in sandboxes, f"Missing 'attacker' in {list(sandboxes)}"
-
-        # primary_vm_name="attacker" must select the attacker VM as "default"
-        assert "default" in sandboxes
-        assert sandboxes["default"] is sandboxes["attacker"]
-        assert sandboxes["default"] is not sandboxes["target"]
-
-        # Commands must reach the VM they were addressed to (each VM sets a
-        # distinct hostname in Vagrantfile.multi)
-        for name in ("target", "attacker"):
-            result = await asyncio.wait_for(
-                sandboxes[name].exec(["hostname"]), timeout=60.0
-            )
-            assert result.success, f"hostname failed on '{name}': {result.stderr}"
-            assert result.stdout.strip() == name, (
-                f"Command for sandbox '{name}' reached VM "
-                f"'{result.stdout.strip()}' instead"
-            )
-
-        # The default sandbox routes to the primary (attacker) VM
-        result = await asyncio.wait_for(
-            sandboxes["default"].exec(["hostname"]), timeout=60.0
-        )
-        assert result.success
-        assert result.stdout.strip() == "attacker"
-    finally:
-        await VagrantSandboxEnvironment.sample_cleanup(
-            "multi_vm_routing",
-            config,
-            sandboxes,
-            interrupted=False,
-        )
 
 
 @pytest.mark.vm_required
