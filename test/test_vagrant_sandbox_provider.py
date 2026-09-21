@@ -1030,3 +1030,56 @@ class TestVagrantStartupThrottle:
                 )
             # Reset concurrency registry to not affect other tests
             init_concurrency()
+
+
+class TestSampleIdHandling:
+    """The sample_id comes from user-controlled sample metadata.
+
+    Inspect passes the sample's raw metadata (dict[str, Any]) despite the
+    base class annotation of dict[str, str], so values may be any JSON-ish
+    type. A non-string sample_id used to crash SandboxDirectory.create with
+    TypeError on sample_id[:8].
+    """
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_sample_init_coerces_non_string_sample_id(
+        self, sample_config, mock_subprocess_patches, mock_sandbox_patches
+    ):
+        """An int sample_id (e.g. Sample.id passed through) must not crash."""
+        with patch(
+            "vagrantsandbox.vagrant_sandbox_provider.Vagrant._run_vagrant_command_async"
+        ) as mock_async_vagrant:
+            mock_async_vagrant.return_value = {
+                "returncode": 0,
+                "stdout": "VM started",
+                "stderr": "",
+            }
+
+            result = await VagrantSandboxEnvironment.sample_init(
+                "test_task", sample_config, {"sample_id": 42}
+            )
+
+            assert "default" in result
+            mock_sandbox_patches["create"].assert_awaited_once_with(sample_id="42")
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_create_sanitizes_hostile_sample_id(self, tmp_path, monkeypatch):
+        """Slashes/spaces in sample_id must not break directory creation."""
+        monkeypatch.setenv("INSPECT_SANDBOX_CACHE_DIR", str(tmp_path))
+
+        sandbox_dir = await SandboxDirectory.create(sample_id="a/b c$d")
+
+        assert sandbox_dir.path.parent == tmp_path
+        assert sandbox_dir.path.is_dir()
+        assert sandbox_dir.path.name.startswith("a-b-c-d-")
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_create_with_plain_sample_id(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("INSPECT_SANDBOX_CACHE_DIR", str(tmp_path))
+
+        sandbox_dir = await SandboxDirectory.create(sample_id="sample01")
+
+        assert sandbox_dir.path.name.startswith("sample01-")
