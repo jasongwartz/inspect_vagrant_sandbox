@@ -792,6 +792,20 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         timeout_retry: bool = True,
     ) -> ExecResult[str]:
         command = shlex.join(cmd)
+        if env:
+            # `&&`, not `;`: a failing `cd` below must abort the command rather
+            # than let it run in the wrong directory
+            exports = " ".join(
+                f"export {key}={shlex.quote(value)} &&" for key, value in env.items()
+            )
+            command = f"{exports} {command}"
+        if cwd is not None:
+            command = f"cd {shlex.quote(cwd)} && {command}"
+        if user is not None:
+            # Vagrant base boxes grant the SSH user passwordless sudo. Wrap the
+            # command in `sh -c` so the cwd/env handling above also runs as the
+            # target user. `-n` fails fast rather than prompting for a password.
+            command = f"sudo -H -n -u {shlex.quote(user)} sh -c {shlex.quote(command)}"
         with trace_action(
             self.logger,
             self.TRACE_NAME,
