@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -132,10 +133,14 @@ class SandboxDirectory:
         base_dir = get_sandbox_cache_dir()
         await asyncio.to_thread(base_dir.mkdir, parents=True, exist_ok=True)
 
-        # Create unique subdirectory name
+        # Create unique subdirectory name. The sample_id is user-controlled
+        # (it comes from the sample's metadata), and the name is used both as
+        # a directory name and as the VM name suffix, so strip anything
+        # filesystem- or hostname-hostile (e.g. "/", spaces).
         short_uuid = uuid.uuid4().hex[:8]
         if sample_id and sample_id != "unknown":
-            subdir_name = f"{sample_id[:8]}-{short_uuid}"
+            safe_id = re.sub(r"[^A-Za-z0-9_-]", "-", sample_id)
+            subdir_name = f"{safe_id[:8]}-{short_uuid}"
         else:
             subdir_name = short_uuid
 
@@ -432,8 +437,13 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                 f"config must be VagrantSandboxEnvironmentConfig, got {type(config).__name__}"
             )
 
-        # Create unique suffix from sample metadata to avoid VM name conflicts
-        sample_id = metadata.get("sample_id", "unknown")
+        # Create unique suffix from sample metadata to avoid VM name conflicts.
+        # Although the base class annotates metadata as dict[str, str], Inspect
+        # actually passes the sample's raw metadata (dict[str, Any]), so the
+        # value can be any JSON-ish type (e.g. an int sample_id). Type it as
+        # `object` so mypy forces the coercion to str.
+        sample_id_value: object = metadata.get("sample_id", "unknown")
+        sample_id = str(sample_id_value)
 
         # Use SandboxDirectory for user-local cache storage (easier to locate/cleanup)
         sandbox_dir = await SandboxDirectory.create(sample_id=sample_id)
