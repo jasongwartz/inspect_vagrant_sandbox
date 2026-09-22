@@ -27,9 +27,11 @@ from typing import AsyncContextManager
 
 from inspect_ai.util import (
     ExecResult,
+    OutputLimitExceededError,
     SandboxConnection,
     SandboxEnvironment,
     SandboxEnvironmentConfigType,
+    SandboxEnvironmentLimits,
     concurrency,
     sandboxenv,
     trace_action,
@@ -865,16 +867,35 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
 
     @override
     async def read_file(self, file: str, text: bool = True) -> str | bytes:
-        command = f"cat {file}"
+        quoted_file = shlex.quote(file)
+        # Check the file's size against Inspect's read limit before transferring
+        # it, then transfer base64-encoded so binary content survives the ssh
+        # round-trip. A single remote command keeps this to one (slow) vagrant
+        # ssh invocation.
+        size_limit = SandboxEnvironmentLimits.MAX_READ_FILE_SIZE
+        limit_marker = "inspect read_file size limit exceeded"
+        command = (
+            f"_size=$(stat -c %s -- {quoted_file}) && "
+            f'{{ [ "$_size" -le {size_limit} ] || '
+            f"{{ echo {shlex.quote(limit_marker)} >&2; exit 70; }}; }} && "
+            f"base64 -- {quoted_file}"
+        )
         result = await self.vagrant.ssh(vm_name=self.vm_name, command=command)
         if result["returncode"] != 0:
+            if limit_marker in result["stderr"]:
+                raise OutputLimitExceededError(
+                    limit_str=SandboxEnvironmentLimits.MAX_READ_FILE_SIZE_STR,
+                    # The potentially large content is not transferred.
+                    truncated_output=None,
+                )
             raise subprocess.CalledProcessError(
                 result["returncode"], command, result["stdout"]
             )
 
+        contents = base64.b64decode(result["stdout"])
         if text:
-            return result["stdout"]
-        return result["stdout"].encode("utf-8")
+            return contents.decode("utf-8")
+        return contents
 
     @override
     async def connection(self, *, user: str | None = None) -> SandboxConnection:
