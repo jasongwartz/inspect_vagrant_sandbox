@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from pathlib import Path
+from inspect_ai.util import OutputLimitExceededError
 from inspect_ai.util._concurrency import init_concurrency
 
 from vagrantsandbox.vagrant_sandbox_provider import (
@@ -559,16 +560,48 @@ class TestVagrantSandboxEnvironment:
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
         mock_vagrant.ssh.return_value = {
             "returncode": 0,
-            "stdout": "file content",
+            "stdout": base64.b64encode(b"file content").decode("ascii"),
             "stderr": "",
         }
 
         result = await env.read_file("/tmp/test.txt")
 
         assert result == "file content"
-        mock_vagrant.ssh.assert_called_once_with(
-            vm_name=None, command="cat /tmp/test.txt"
-        )
+        mock_vagrant.ssh.assert_called_once()
+        command = mock_vagrant.ssh.call_args[1]["command"]
+        # Content is transferred base64-encoded (binary-safe), after a size check
+        assert "base64 -- /tmp/test.txt" in command
+        assert "stat -c %s -- /tmp/test.txt" in command
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_read_file_binary(self, mock_vagrant, mock_sandbox_dir):
+        """Test reading non-UTF-8 binary content with text=False."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        binary_content = b"\xc3\x28"  # invalid UTF-8
+        mock_vagrant.ssh.return_value = {
+            "returncode": 0,
+            "stdout": base64.b64encode(binary_content).decode("ascii"),
+            "stderr": "",
+        }
+
+        result = await env.read_file("/tmp/test.bin", text=False)
+
+        assert result == binary_content
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_read_file_limit(self, mock_vagrant, mock_sandbox_dir):
+        """Test that reading an oversized file raises OutputLimitExceededError."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {
+            "returncode": 70,
+            "stdout": "",
+            "stderr": "inspect read_file size limit exceeded",
+        }
+
+        with pytest.raises(OutputLimitExceededError):
+            await env.read_file("/tmp/huge.bin")
 
     @pytest.mark.unit
     @pytest.mark.asyncio
