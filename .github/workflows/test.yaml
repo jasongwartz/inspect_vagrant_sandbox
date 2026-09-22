@@ -2,6 +2,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   # Pytest marker expression used to discover integration tests
   # Modify this to change which tests are included in the CI matrix

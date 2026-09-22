@@ -459,6 +459,54 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_exec_forwards_env(self, mock_vagrant, mock_sandbox_dir):
+        """Test that env vars are exported before the command."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
+
+        await env.exec(["printenv", "MY_VAR"], env={"MY_VAR": "my value"})
+
+        command = mock_vagrant.ssh.call_args[1]["command"]
+        assert command == "export MY_VAR='my value' && printenv MY_VAR"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_forwards_cwd(self, mock_vagrant, mock_sandbox_dir):
+        """Test that cwd is applied via cd before the command."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
+
+        await env.exec(["ls"], cwd="/usr/bin")
+
+        command = mock_vagrant.ssh.call_args[1]["command"]
+        assert command == "cd /usr/bin && ls"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_cwd_and_env_are_chained(self, mock_vagrant, mock_sandbox_dir):
+        """A cwd that fails must abort the command, not run it somewhere else."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
+
+        await env.exec(["ls"], cwd="/missing", env={"MY_VAR": "value"})
+
+        command = mock_vagrant.ssh.call_args[1]["command"]
+        assert command == "cd /missing && export MY_VAR=value && ls"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_forwards_user(self, mock_vagrant, mock_sandbox_dir):
+        """Test that user is applied via sudo, wrapping cwd/env handling."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
+
+        await env.exec(["whoami"], user="root", cwd="/tmp")
+
+        command = mock_vagrant.ssh.call_args[1]["command"]
+        assert command == "sudo -H -n -u root sh -c 'cd /tmp && whoami'"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_write_file_success(self, mock_vagrant, mock_sandbox_dir):
         """Test successful file writing."""
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
