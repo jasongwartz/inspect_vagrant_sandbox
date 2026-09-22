@@ -231,15 +231,8 @@ class Vagrant(BaseVagrant):
         with fields ``(name, state, provider)`` - one per machine defined in
         the Vagrantfile, whether or not it has been created yet.
         """
-        try:
-            # Use python-vagrant's built-in status method
-            status_info: list[Status] = await _run_in_executor(self.status)
-        except (subprocess.SubprocessError, OSError) as e:
-            self.logger.warning(
-                f"'vagrant status' failed while discovering VM names: {e}. "
-                "Falling back to single-VM mode."
-            )
-            return []
+        # Use python-vagrant's built-in status method
+        status_info: list[Status] = await _run_in_executor(self.status)
         vm_names: list[str] = [vm.name for vm in status_info]
         self.logger.debug(f"get_vm_names status_info: {status_info}")
         self.logger.debug(f"get_vm_names extracted names: {vm_names}")
@@ -247,7 +240,7 @@ class Vagrant(BaseVagrant):
 
     async def _run_vagrant_command_async(
         self,
-        args: list[str | None],
+        args: list[str],
         input: str | bytes | None = None,
         timeout: int | float | TimeoutConfig | None = None,
     ) -> ExecCommandReturn:
@@ -255,8 +248,7 @@ class Vagrant(BaseVagrant):
         Run a vagrant command and return everything, not just stdout.
 
         args: A sequence of arguments to a vagrant command line.
-        e.g. ['up', 'my_vm_name', '--no-provision'] or
-        ['up', None, '--no-provision'] for a non-Multi-VM environment.
+        e.g. ['up', 'my_vm_name', '--no-provision'].
         input: Optional input to pass to stdin.
         timeout: Optional timeout - can be a number (seconds) or TimeoutConfig
             for fine-grained control over grace periods.
@@ -343,10 +335,13 @@ class Vagrant(BaseVagrant):
         }
 
     @override
-    def ssh(
+    # This override intentionally departs from python-vagrant's `ssh(vm_name=None,
+    # command=None, ...)` contract: it is async and requires an explicit VM name
+    # and command, because the None "single-VM" sentinel no longer exists here.
+    def ssh(  # type: ignore[override]
         self,
-        vm_name: str | None = None,
-        command: str | None = None,
+        vm_name: str,
+        command: str,
         extra_ssh_args: str | None = None,
         input: str | bytes | None = None,
         timeout: int | float | TimeoutConfig | None = None,
@@ -408,7 +403,7 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         self,
         sandbox_dir: SandboxDirectory,
         vagrant: Vagrant,
-        vm_name: str | None = None,
+        vm_name: str,
     ):
         self.vagrant = vagrant
         self.sandbox_dir = sandbox_dir
@@ -475,18 +470,19 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
 
         vagrant = Vagrant(root=str(sandbox_dir), env=vagrant_env)
 
-        # Get available VMs before starting them
-        # list[str | None] because [None] is used below as the sentinel for a
-        # single-VM Vagrantfile (list is invariant, so a copy is needed).
-        vm_names: list[str | None] = list(await vagrant.get_vm_names())
+        # Get available VMs before starting them. Vagrant always defines at
+        # least one machine for a valid Vagrantfile, so an empty result means
+        # something is wrong - fail fast rather than proceed with no sandboxes.
+        vm_names = await vagrant.get_vm_names()
         cls.logger.debug(f"Discovered VMs in Vagrantfile: {vm_names}")
 
-        # If no VMs found, assume single-VM Vagrantfile
         if not vm_names:
-            cls.logger.warning(
-                "No VMs discovered via 'vagrant status', assuming single-VM Vagrantfile"
+            await sandbox_dir.cleanup()
+            raise RuntimeError(
+                "No VMs were discovered in the Vagrantfile at "
+                f"'{config.vagrantfile_path}'. Inspect requires a default "
+                "sandbox, so at least one VM must be defined."
             )
-            vm_names = [None]  # None means default/single VM
 
         try:
             # Start all VMs
@@ -592,19 +588,19 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         if primary_vm_base:
             # Find VM whose base name (suffix stripped) matches
             for vm_name in vm_names:
-                if vm_name and base_vm_name(vm_name) == primary_vm_base:
+                if base_vm_name(vm_name) == primary_vm_base:
                     primary_vm = vm_name
                     break
 
             if not primary_vm:
-                available_vms = [base_vm_name(vm) for vm in vm_names if vm is not None]
+                available_vms = [base_vm_name(vm) for vm in vm_names]
                 cls.logger.warning(
                     f"Primary VM '{primary_vm_base}' not found. "
                     f"Available VMs: {available_vms}. Using first available VM."
                 )
-                primary_vm = vm_names[0] if vm_names else None
+                primary_vm = vm_names[0]
         else:
-            primary_vm = vm_names[0] if vm_names else None
+            primary_vm = vm_names[0]
 
         # Create sandbox environments for each VM
         cls.logger.debug(f"Creating sandbox environments. Primary VM: {primary_vm}")
@@ -613,9 +609,7 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             env = VagrantSandboxEnvironment(sandbox_dir, vagrant, vm_name)
             cls.logger.debug(f"Created environment for VM: {vm_name}")
 
-            # Add by base VM name if it's not None (multi-VM case)
-            if vm_name is not None:
-                sandboxes[base_vm_name(vm_name)] = env
+            sandboxes[base_vm_name(vm_name)] = env
 
             if vm_name == primary_vm:
                 primary_env = env
