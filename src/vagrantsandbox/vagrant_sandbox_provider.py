@@ -835,6 +835,19 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                 raise PermissionError(f"Permission denied executing command: {command}")
             return exec_result
 
+    @staticmethod
+    def _raise_file_error(
+        file: str, command: str, returncode: int, stdout: str, stderr: str
+    ) -> None:
+        """Map a failed file operation to the errno-style exceptions Inspect expects."""
+        if "No such file or directory" in stderr:
+            raise FileNotFoundError(f"No such file or directory: {file}")
+        if "Is a directory" in stderr:
+            raise IsADirectoryError(f"Is a directory: {file}")
+        if "Permission denied" in stderr:
+            raise PermissionError(f"Permission denied: {file}")
+        raise subprocess.CalledProcessError(returncode, command, stdout, stderr)
+
     @override
     async def write_file(self, file: str, contents: str | bytes) -> None:
         contents_bytes: bytes
@@ -855,8 +868,8 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             vm_name=self.vm_name, command=command, input=encoded
         )
         if result["returncode"] != 0:
-            raise subprocess.CalledProcessError(
-                result["returncode"], command, result["stdout"]
+            self._raise_file_error(
+                file, command, result["returncode"], result["stdout"], result["stderr"]
             )
 
     @overload
@@ -888,8 +901,8 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                     # The potentially large content is not transferred.
                     truncated_output=None,
                 )
-            raise subprocess.CalledProcessError(
-                result["returncode"], command, result["stdout"]
+            self._raise_file_error(
+                file, command, result["returncode"], result["stdout"], result["stderr"]
             )
 
         contents = base64.b64decode(result["stdout"])
