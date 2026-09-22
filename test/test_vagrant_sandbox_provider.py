@@ -542,13 +542,41 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_write_file_failure(self, mock_vagrant, mock_sandbox_dir):
-        """Test file writing failure."""
+    async def test_write_file_permission_denied(self, mock_vagrant, mock_sandbox_dir):
+        """Test that write failures from missing permissions raise PermissionError."""
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
         mock_vagrant.ssh.return_value = {
             "returncode": 1,
             "stdout": "",
-            "stderr": "permission denied",
+            "stderr": "sh: 1: cannot create /root/test.txt: Permission denied",
+        }
+
+        with pytest.raises(PermissionError):
+            await env.write_file("/root/test.txt", "test content")
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_write_file_is_directory(self, mock_vagrant, mock_sandbox_dir):
+        """Test that writing to a directory raises IsADirectoryError."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {
+            "returncode": 1,
+            "stdout": "",
+            "stderr": "sh: 1: cannot create /tmp/somedir: Is a directory",
+        }
+
+        with pytest.raises(IsADirectoryError):
+            await env.write_file("/tmp/somedir", "test content")
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_write_file_unmapped_failure(self, mock_vagrant, mock_sandbox_dir):
+        """Test that unrecognized write failures raise CalledProcessError."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {
+            "returncode": 1,
+            "stdout": "",
+            "stderr": "something inexplicable went wrong",
         }
 
         with pytest.raises(subprocess.CalledProcessError):
@@ -619,13 +647,27 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_read_file_failure(self, mock_vagrant, mock_sandbox_dir):
-        """Test file reading failure."""
+    async def test_read_file_not_found(self, mock_vagrant, mock_sandbox_dir):
+        """Test that reading a missing file raises FileNotFoundError."""
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
         mock_vagrant.ssh.return_value = {
             "returncode": 1,
             "stdout": "",
-            "stderr": "file not found",
+            "stderr": "stat: cannot statx '/missing/file.txt': No such file or directory",
+        }
+
+        with pytest.raises(FileNotFoundError):
+            await env.read_file("/missing/file.txt")
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_read_file_unmapped_failure(self, mock_vagrant, mock_sandbox_dir):
+        """Test that unrecognized read failures raise CalledProcessError."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {
+            "returncode": 1,
+            "stdout": "",
+            "stderr": "something inexplicable went wrong",
         }
 
         with pytest.raises(subprocess.CalledProcessError):
