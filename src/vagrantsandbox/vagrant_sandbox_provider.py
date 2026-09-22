@@ -819,12 +819,19 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                 vm_name=self.vm_name, command=command, input=input, timeout=timeout
             )
 
-            return ExecResult(
+            exec_result = ExecResult(
                 success=result["returncode"] == 0,
                 returncode=result["returncode"],
                 stdout=result["stdout"],
                 stderr=result["stderr"],
             )
+            if (
+                exec_result.returncode == 126
+                and "permission denied"
+                in (exec_result.stdout + exec_result.stderr).lower()
+            ):
+                raise PermissionError(f"Permission denied executing command: {command}")
+            return exec_result
 
     @override
     async def write_file(self, file: str, contents: str | bytes) -> None:
