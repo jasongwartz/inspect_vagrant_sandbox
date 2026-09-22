@@ -665,6 +665,20 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_exec_output_over_limit(self, mock_vagrant, mock_sandbox_dir):
+        """Test that output larger than 10 MiB raises OutputLimitExceededError."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {
+            "returncode": 0,
+            "stdout": "x" * (10 * 1024**2 + 1),
+            "stderr": "",
+        }
+
+        with pytest.raises(OutputLimitExceededError):
+            await env.exec(["cat", "big"])
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_write_file_success(self, mock_vagrant, mock_sandbox_dir):
         """Test successful file writing."""
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
