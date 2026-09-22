@@ -224,7 +224,7 @@ class ExecCommandReturn(TypedDict):
 class Vagrant(BaseVagrant):
     logger = getLogger(__name__)
 
-    async def get_vm_names(self) -> list[str | None]:
+    async def get_vm_names(self) -> list[str]:
         """Get list of VM names defined in the Vagrantfile.
 
         python-vagrant's ``status()`` returns a list of ``Status`` namedtuples
@@ -240,7 +240,7 @@ class Vagrant(BaseVagrant):
                 "Falling back to single-VM mode."
             )
             return []
-        vm_names: list[str | None] = [vm.name for vm in status_info]
+        vm_names: list[str] = [vm.name for vm in status_info]
         self.logger.debug(f"get_vm_names status_info: {status_info}")
         self.logger.debug(f"get_vm_names extracted names: {vm_names}")
         return vm_names
@@ -476,7 +476,10 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         vagrant = Vagrant(root=str(sandbox_dir), env=vagrant_env)
 
         # Get available VMs before starting them
-        vm_names = await vagrant.get_vm_names()
+        # list[str | None] because when no VMs are discovered, [None] is used
+        # below to mean "the default VM" (list is invariant, so a copy is
+        # needed to widen the element type).
+        vm_names: list[str | None] = list(await vagrant.get_vm_names())
         cls.logger.debug(f"Discovered VMs in Vagrantfile: {vm_names}")
 
         # If no VMs found, assume single-VM Vagrantfile
