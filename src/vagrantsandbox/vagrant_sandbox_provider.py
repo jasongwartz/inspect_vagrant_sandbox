@@ -405,6 +405,18 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
 
     TRACE_NAME = "vagrant_sandbox_environment"
 
+    # Marker line emitted by the exec() wrapper to separate the guest
+    # command's stdout from its base64-encoded stderr. `vagrant ssh` mixes
+    # host-side warnings (from vagrant itself or its plugins, e.g. fog's
+    # "[fog][WARNING] Unrecognized arguments" under libvirt) into the
+    # subprocess's stderr stream, so the guest command's real stderr is
+    # carried inside stdout instead, after this marker.
+    STDERR_MARKER = "__inspect_vagrant_stderr_8f2c41a6__"
+
+    # Exit code the exec() wrapper uses when it cannot set up stderr capture
+    # (mktemp failed before the guest command ran).
+    STDERR_CAPTURE_SETUP_FAILED = 125
+
     vagrant: Vagrant
 
     def __init__(
@@ -818,14 +830,20 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             "exec_command ",
         ):
             result = await self.vagrant.ssh(
-                vm_name=self.vm_name, command=command, input=input, timeout=timeout
+                vm_name=self.vm_name,
+                command=self._wrap_command_to_capture_stderr(command),
+                input=input,
+                timeout=timeout,
             )
 
+            stdout, stderr = self._split_captured_stderr(
+                result["stdout"], result["stderr"]
+            )
             exec_result = ExecResult(
                 success=result["returncode"] == 0,
                 returncode=result["returncode"],
-                stdout=result["stdout"],
-                stderr=result["stderr"],
+                stdout=stdout,
+                stderr=stderr,
             )
             if (
                 exec_result.returncode == 126
@@ -834,6 +852,50 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             ):
                 raise PermissionError(f"Permission denied executing command: {command}")
             return exec_result
+
+    @classmethod
+    def _wrap_command_to_capture_stderr(cls, command: str) -> str:
+        """Wrap a guest command so its own stderr can be recovered exactly.
+
+        The command's stderr is redirected to a temp file, then appended to
+        stdout base64-encoded after a marker line, keeping it separate from
+        the host-side warnings vagrant writes to the subprocess's stderr.
+        The command's exit code is passed through unchanged. `base64 < file`
+        (not `base64 -- file`) keeps the form portable to BSD base64.
+        """
+        return (
+            f"_stderr_file=$(mktemp) || exit {cls.STDERR_CAPTURE_SETUP_FAILED}; "
+            f'{{ {command}; }} 2>"$_stderr_file"; _rc=$?; '
+            f"printf '\\n%s\\n' {shlex.quote(cls.STDERR_MARKER)}; "
+            f'base64 < "$_stderr_file"; rm -f -- "$_stderr_file"; exit "$_rc"'
+        )
+
+    @classmethod
+    def _split_captured_stderr(cls, stdout: str, stderr: str) -> tuple[str, str]:
+        """Recover the guest command's real (stdout, stderr) from ssh output.
+
+        Splits the subprocess stdout at the marker line the wrapper printed:
+        before it is the guest command's stdout, after it is the guest
+        command's stderr, base64-encoded. The subprocess's own stderr (host
+        noise from vagrant/plugins) is discarded. If the marker is missing
+        (ssh failed before the wrapper ran, or stderr capture setup failed)
+        or the encoded stderr does not decode, the raw stdout/stderr are
+        returned unchanged so failures stay debuggable.
+        """
+        real_stdout, marker, encoded_stderr = stdout.rpartition(
+            f"\n{cls.STDERR_MARKER}\n"
+        )
+        if not marker:
+            return stdout, stderr
+        try:
+            # base64 wraps its output across lines; strip whitespace before
+            # strict decoding so genuinely malformed data still falls back.
+            real_stderr = base64.b64decode(
+                "".join(encoded_stderr.split()), validate=True
+            ).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return stdout, stderr
+        return real_stdout, real_stderr
 
     @staticmethod
     def _raise_file_error(

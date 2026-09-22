@@ -22,6 +22,26 @@ from vagrantsandbox.vagrant_sandbox_provider import (
 )
 
 
+def unwrap_exec_command(wrapped: str) -> str:
+    """Extract the inner guest command from exec()'s stderr-capture wrapper."""
+    prefix = (
+        "_stderr_file=$(mktemp) || exit "
+        f"{VagrantSandboxEnvironment.STDERR_CAPTURE_SETUP_FAILED}; {{ "
+    )
+    assert wrapped.startswith(prefix), f"not a wrapped exec command: {wrapped}"
+    return wrapped[len(prefix) :].split('; } 2>"$_stderr_file"')[0]
+
+
+def wrapped_exec_output(stdout: str, stderr: str = "") -> str:
+    """Build the ssh stdout exec()'s wrapper would produce for a guest command.
+
+    Mirrors the wrapper: the guest command's stdout, then a newline plus the
+    marker line, then the guest command's stderr base64-encoded.
+    """
+    encoded = base64.b64encode(stderr.encode("utf-8")).decode("ascii")
+    return f"{stdout}\n{VagrantSandboxEnvironment.STDERR_MARKER}\n{encoded}\n"
+
+
 # Shared fixtures and test data
 @pytest.fixture
 def mock_vagrant():
@@ -393,7 +413,7 @@ class TestVagrantSandboxEnvironment:
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
         mock_vagrant.ssh.return_value = {
             "returncode": 0,
-            "stdout": "command output",
+            "stdout": wrapped_exec_output("command output"),
             "stderr": "",
         }
 
@@ -403,9 +423,12 @@ class TestVagrantSandboxEnvironment:
         assert result.returncode == 0
         assert result.stdout == "command output"
         assert result.stderr == ""
-        mock_vagrant.ssh.assert_called_once_with(
-            vm_name=None, command="ls -la", input=None, timeout=None
-        )
+        mock_vagrant.ssh.assert_called_once()
+        call_kwargs = mock_vagrant.ssh.call_args.kwargs
+        assert call_kwargs["vm_name"] is None
+        assert call_kwargs["input"] is None
+        assert call_kwargs["timeout"] is None
+        assert unwrap_exec_command(call_kwargs["command"]) == "ls -la"
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -414,8 +437,8 @@ class TestVagrantSandboxEnvironment:
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
         mock_vagrant.ssh.return_value = {
             "returncode": 1,
-            "stdout": "",
-            "stderr": "command failed",
+            "stdout": wrapped_exec_output("", stderr="command failed"),
+            "stderr": "",
         }
 
         result = await env.exec(["false"])
@@ -436,7 +459,7 @@ class TestVagrantSandboxEnvironment:
         await env.exec(["bash", "-c", "ls && cat /etc/passwd"])
 
         call_args = mock_vagrant.ssh.call_args
-        command = call_args[1]["command"]
+        command = unwrap_exec_command(call_args[1]["command"])
         # shlex.join should quote the argument containing &&
         assert "&&" not in command.split("'")[0], "Metacharacters should be quoted"
         assert "'ls && cat /etc/passwd'" in command
@@ -453,7 +476,7 @@ class TestVagrantSandboxEnvironment:
 
         await env.exec(["echo", f"test {metachar} injection"])
 
-        command = mock_vagrant.ssh.call_args[1]["command"]
+        command = unwrap_exec_command(mock_vagrant.ssh.call_args[1]["command"])
         # The metacharacter should appear inside quotes, not bare
         assert command.startswith("echo "), "Command should start with 'echo '"
         assert metachar not in command.split("'")[0], f"{metachar} should be quoted"
@@ -467,7 +490,7 @@ class TestVagrantSandboxEnvironment:
 
         await env.exec(["printenv", "MY_VAR"], env={"MY_VAR": "my value"})
 
-        command = mock_vagrant.ssh.call_args[1]["command"]
+        command = unwrap_exec_command(mock_vagrant.ssh.call_args[1]["command"])
         assert command == "export MY_VAR='my value' && printenv MY_VAR"
 
     @pytest.mark.unit
@@ -479,7 +502,7 @@ class TestVagrantSandboxEnvironment:
 
         await env.exec(["ls"], cwd="/usr/bin")
 
-        command = mock_vagrant.ssh.call_args[1]["command"]
+        command = unwrap_exec_command(mock_vagrant.ssh.call_args[1]["command"])
         assert command == "cd /usr/bin && ls"
 
     @pytest.mark.unit
@@ -491,7 +514,7 @@ class TestVagrantSandboxEnvironment:
 
         await env.exec(["ls"], cwd="/missing", env={"MY_VAR": "value"})
 
-        command = mock_vagrant.ssh.call_args[1]["command"]
+        command = unwrap_exec_command(mock_vagrant.ssh.call_args[1]["command"])
         assert command == "cd /missing && export MY_VAR=value && ls"
 
     @pytest.mark.unit
@@ -503,7 +526,7 @@ class TestVagrantSandboxEnvironment:
 
         await env.exec(["whoami"], user="root", cwd="/tmp")
 
-        command = mock_vagrant.ssh.call_args[1]["command"]
+        command = unwrap_exec_command(mock_vagrant.ssh.call_args[1]["command"])
         assert command == "sudo -H -n -u root sh -c 'cd /tmp && whoami'"
 
     @pytest.mark.unit
@@ -519,6 +542,126 @@ class TestVagrantSandboxEnvironment:
 
         with pytest.raises(PermissionError):
             await env.exec(["/etc/passwd"])
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_returns_guest_stderr(self, mock_vagrant, mock_sandbox_dir):
+        """The guest command's stderr is recovered from after the marker line."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        marker = VagrantSandboxEnvironment.STDERR_MARKER
+        encoded = base64.b64encode(b"guest err").decode("ascii")
+        mock_vagrant.ssh.return_value = {
+            "returncode": 0,
+            # The guest command emitted "real out" without a trailing
+            # newline; the wrapper's printf supplies the newline before the
+            # marker line.
+            "stdout": f"real out\n{marker}\n{encoded}\n",
+            "stderr": "host-side warning from vagrant\n",
+        }
+
+        result = await env.exec(["some-command"])
+
+        assert result.stdout == "real out"
+        assert result.stderr == "guest err"
+        assert "host-side warning" not in result.stderr
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_preserves_guest_stdout_trailing_newline(
+        self, mock_vagrant, mock_sandbox_dir
+    ):
+        """A trailing newline emitted by the guest command is kept.
+
+        Only the single newline added by the wrapper's printf is consumed as
+        part of the marker separator; the guest command's own output is
+        returned byte-for-byte.
+        """
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {
+            "returncode": 0,
+            "stdout": wrapped_exec_output("real out\n"),
+            "stderr": "",
+        }
+
+        result = await env.exec(["echo", "real out"])
+
+        assert result.stdout == "real out\n"
+        assert result.stderr == ""
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_discards_host_stderr_noise(
+        self, mock_vagrant, mock_sandbox_dir
+    ):
+        """Warnings vagrant/plugins write to the subprocess stderr are dropped."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        fog_warning = "[fog][WARNING] Unrecognized arguments: libvirt_ip_command\n"
+        mock_vagrant.ssh.return_value = {
+            "returncode": 0,
+            "stdout": wrapped_exec_output("ok\n", stderr=""),
+            "stderr": fog_warning,
+        }
+
+        result = await env.exec(["true"])
+
+        assert result.stderr == ""
+        assert fog_warning not in result.stdout
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_marker_missing_falls_back(self, mock_vagrant, mock_sandbox_dir):
+        """Without the marker (ssh failed early), output passes through as-is."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {
+            "returncode": 255,
+            "stdout": "plain output\n",
+            "stderr": "ssh: connection refused\n",
+        }
+
+        result = await env.exec(["ls"])
+
+        assert result.stdout == "plain output\n"
+        assert result.stderr == "ssh: connection refused\n"
+        assert result.returncode == 255
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_invalid_stderr_encoding_falls_back(
+        self, mock_vagrant, mock_sandbox_dir
+    ):
+        """If the captured stderr does not base64-decode, output passes through."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        marker = VagrantSandboxEnvironment.STDERR_MARKER
+        stdout = f"real out\n{marker}\nnot!valid!base64\n"
+        mock_vagrant.ssh.return_value = {
+            "returncode": 0,
+            "stdout": stdout,
+            "stderr": "host noise\n",
+        }
+
+        result = await env.exec(["ls"])
+
+        assert result.stdout == stdout
+        assert result.stderr == "host noise\n"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_wrapper_returncode_preserved(
+        self, mock_vagrant, mock_sandbox_dir
+    ):
+        """The guest command's exit code flows through the wrapper unchanged."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {
+            "returncode": 3,
+            "stdout": wrapped_exec_output("", stderr="boom\n"),
+            "stderr": "",
+        }
+
+        result = await env.exec(["exit-3"])
+
+        assert result.success is False
+        assert result.returncode == 3
+        assert result.stderr == "boom\n"
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -934,9 +1077,10 @@ class TestTimeoutHandling:
         result = await env.exec(["ls", "-la"], timeout=120)
 
         assert result.success is True
-        mock_vagrant.ssh.assert_called_once_with(
-            vm_name=None, command="ls -la", input=None, timeout=120
-        )
+        mock_vagrant.ssh.assert_called_once()
+        call_kwargs = mock_vagrant.ssh.call_args.kwargs
+        assert call_kwargs["timeout"] == 120
+        assert unwrap_exec_command(call_kwargs["command"]) == "ls -la"
 
     @pytest.mark.unit
     @pytest.mark.asyncio
