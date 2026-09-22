@@ -337,7 +337,8 @@ class Vagrant(BaseVagrant):
     @override
     # This override intentionally departs from python-vagrant's `ssh(vm_name=None,
     # command=None, ...)` contract: it is async and requires an explicit VM name
-    # and command, because the None "single-VM" sentinel no longer exists here.
+    # and command - the VM name is always known here, and None no longer has a
+    # special "use the default VM" meaning.
     def ssh(  # type: ignore[override]
         self,
         vm_name: str,
