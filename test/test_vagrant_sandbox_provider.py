@@ -334,6 +334,21 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_sample_init_cleans_up_when_discovery_fails(
+        self, sample_config, mock_subprocess_patches, mock_sandbox_patches
+    ):
+        """A vagrant status failure must not leak the sandbox directory."""
+        mock_sandbox_patches[
+            "get_vm_names"
+        ].side_effect = subprocess.CalledProcessError(1, "vagrant status")
+
+        with pytest.raises(subprocess.CalledProcessError):
+            await VagrantSandboxEnvironment.sample_init("test_task", sample_config, {})
+
+        mock_sandbox_patches["sandbox"].cleanup.assert_awaited_once()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_sample_init_raises_when_no_vms_discovered(
         self, sample_config, mock_subprocess_patches, mock_sandbox_patches
     ):

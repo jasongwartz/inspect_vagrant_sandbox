@@ -473,7 +473,13 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         # Get available VMs before starting them. Vagrant always defines at
         # least one machine for a valid Vagrantfile, so an empty result means
         # something is wrong - fail fast rather than proceed with no sandboxes.
-        vm_names = await vagrant.get_vm_names()
+        # No VM has been started yet, so on any discovery failure remove the
+        # just-created sandbox directory rather than leaking it.
+        try:
+            vm_names = await vagrant.get_vm_names()
+        except BaseException:
+            await sandbox_dir.cleanup()
+            raise
         cls.logger.debug(f"Discovered VMs in Vagrantfile: {vm_names}")
 
         if not vm_names:
