@@ -36,6 +36,7 @@ from inspect_ai.util import (
     sandboxenv,
     trace_action,
 )
+from inspect_ai.util._sandbox.limits import verify_exec_result_size
 from inspect_ai.util._subprocess import default_max_subprocesses
 from platformdirs import user_cache_dir
 from pydantic import BaseModel, Field, field_validator
@@ -833,6 +834,7 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                 in (exec_result.stdout + exec_result.stderr).lower()
             ):
                 raise PermissionError(f"Permission denied executing command: {command}")
+            verify_exec_result_size(exec_result)
             return exec_result
 
     @staticmethod
