@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import os
 import subprocess
 from unittest.mock import AsyncMock, Mock, patch
@@ -515,7 +516,14 @@ class TestVagrantSandboxEnvironment:
 
         mock_vagrant.ssh.assert_called_once()
         call_args = mock_vagrant.ssh.call_args
-        assert "printf %s 'test content' > /tmp/test.txt" in call_args[1]["command"]
+        # Content is transferred base64-encoded via stdin (binary-safe), and
+        # parent directories are created first
+        assert (
+            "mkdir -p -- /tmp && base64 -d > /tmp/test.txt" in (call_args[1]["command"])
+        )
+        assert call_args[1]["input"] == base64.b64encode(b"test content").decode(
+            "ascii"
+        )
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -534,13 +542,15 @@ class TestVagrantSandboxEnvironment:
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_write_file_bytes_content(self, mock_vagrant, mock_sandbox_dir):
-        """Test writing bytes content to file."""
+        """Test writing bytes content to file, including non-UTF-8 bytes."""
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
         mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
 
-        await env.write_file("/tmp/test.txt", b"test content")
+        await env.write_file("/tmp/test.txt", b"\xc3\x28")  # invalid UTF-8
 
         mock_vagrant.ssh.assert_called_once()
+        call_args = mock_vagrant.ssh.call_args
+        assert call_args[1]["input"] == base64.b64encode(b"\xc3\x28").decode("ascii")
 
     @pytest.mark.unit
     @pytest.mark.asyncio
