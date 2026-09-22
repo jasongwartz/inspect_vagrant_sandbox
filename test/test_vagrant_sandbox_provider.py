@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import os
 import subprocess
 from unittest.mock import AsyncMock, Mock, patch
@@ -458,6 +459,54 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_exec_forwards_env(self, mock_vagrant, mock_sandbox_dir):
+        """Test that env vars are exported before the command."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
+
+        await env.exec(["printenv", "MY_VAR"], env={"MY_VAR": "my value"})
+
+        command = mock_vagrant.ssh.call_args[1]["command"]
+        assert command == "export MY_VAR='my value' && printenv MY_VAR"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_forwards_cwd(self, mock_vagrant, mock_sandbox_dir):
+        """Test that cwd is applied via cd before the command."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
+
+        await env.exec(["ls"], cwd="/usr/bin")
+
+        command = mock_vagrant.ssh.call_args[1]["command"]
+        assert command == "cd /usr/bin && ls"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_cwd_and_env_are_chained(self, mock_vagrant, mock_sandbox_dir):
+        """A cwd that fails must abort the command, not run it somewhere else."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
+
+        await env.exec(["ls"], cwd="/missing", env={"MY_VAR": "value"})
+
+        command = mock_vagrant.ssh.call_args[1]["command"]
+        assert command == "cd /missing && export MY_VAR=value && ls"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_forwards_user(self, mock_vagrant, mock_sandbox_dir):
+        """Test that user is applied via sudo, wrapping cwd/env handling."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
+
+        await env.exec(["whoami"], user="root", cwd="/tmp")
+
+        command = mock_vagrant.ssh.call_args[1]["command"]
+        assert command == "sudo -H -n -u root sh -c 'cd /tmp && whoami'"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_exec_permission_denied(self, mock_vagrant, mock_sandbox_dir):
         """Test that executing a non-executable file raises PermissionError."""
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
@@ -481,7 +530,14 @@ class TestVagrantSandboxEnvironment:
 
         mock_vagrant.ssh.assert_called_once()
         call_args = mock_vagrant.ssh.call_args
-        assert "printf %s 'test content' > /tmp/test.txt" in call_args[1]["command"]
+        # Content is transferred base64-encoded via stdin (binary-safe), and
+        # parent directories are created first
+        assert (
+            "mkdir -p -- /tmp && base64 -d > /tmp/test.txt" in (call_args[1]["command"])
+        )
+        assert call_args[1]["input"] == base64.b64encode(b"test content").decode(
+            "ascii"
+        )
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -500,13 +556,15 @@ class TestVagrantSandboxEnvironment:
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_write_file_bytes_content(self, mock_vagrant, mock_sandbox_dir):
-        """Test writing bytes content to file."""
+        """Test writing bytes content to file, including non-UTF-8 bytes."""
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
         mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
 
-        await env.write_file("/tmp/test.txt", b"test content")
+        await env.write_file("/tmp/test.txt", b"\xc3\x28")  # invalid UTF-8
 
         mock_vagrant.ssh.assert_called_once()
+        call_args = mock_vagrant.ssh.call_args
+        assert call_args[1]["input"] == base64.b64encode(b"\xc3\x28").decode("ascii")
 
     @pytest.mark.unit
     @pytest.mark.asyncio

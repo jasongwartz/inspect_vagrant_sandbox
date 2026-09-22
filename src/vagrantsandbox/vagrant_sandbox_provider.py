@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import os
 import re
 import shlex
@@ -792,6 +793,22 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         timeout_retry: bool = True,
     ) -> ExecResult[str]:
         command = shlex.join(cmd)
+        if env:
+            # `&&`, not `;`: a failing `cd` below must abort the command rather
+            # than let it run in the wrong directory
+            exports = " ".join(
+                f"export {key}={shlex.quote(value)} &&" for key, value in env.items()
+            )
+            command = f"{exports} {command}"
+        if cwd is not None:
+            command = f"cd {shlex.quote(cwd)} && {command}"
+        if user is not None:
+            # Vagrant's base box guidelines require passwordless sudo for the
+            # SSH user, and mainstream boxes comply. Wrap the command in `sh -c`
+            # so the cwd/env handling above also runs as the target user. `-n`
+            # makes a non-compliant box fail fast ("sudo: a password is
+            # required" on stderr) instead of hanging on a password prompt.
+            command = f"sudo -H -n -u {shlex.quote(user)} sh -c {shlex.quote(command)}"
         with trace_action(
             self.logger,
             self.TRACE_NAME,
@@ -818,16 +835,23 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
 
     @override
     async def write_file(self, file: str, contents: str | bytes) -> None:
-        contents_str: str
+        contents_bytes: bytes
         if isinstance(contents, bytes):
-            contents_str = contents.decode()
+            contents_bytes = contents
         elif isinstance(contents, str):
-            contents_str = contents
+            contents_bytes = contents.encode("utf-8")
         else:
             assert_never(contents)
 
-        command = f"printf %s {shlex.quote(contents_str)} > {shlex.quote(file)}"
-        result = await self.vagrant.ssh(vm_name=self.vm_name, command=command)
+        # Transfer the content base64-encoded via stdin: this is binary-safe
+        # and avoids shell command-length limits for large files.
+        encoded = base64.b64encode(contents_bytes).decode("ascii")
+        parent = os.path.dirname(file)
+        mkdir_prefix = f"mkdir -p -- {shlex.quote(parent)} && " if parent else ""
+        command = f"{mkdir_prefix}base64 -d > {shlex.quote(file)}"
+        result = await self.vagrant.ssh(
+            vm_name=self.vm_name, command=command, input=encoded
+        )
         if result["returncode"] != 0:
             raise subprocess.CalledProcessError(
                 result["returncode"], command, result["stdout"]
