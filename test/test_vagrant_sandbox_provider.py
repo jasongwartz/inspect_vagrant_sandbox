@@ -508,6 +508,20 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_exec_permission_denied(self, mock_vagrant, mock_sandbox_dir):
+        """Test that executing a non-executable file raises PermissionError."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {
+            "returncode": 126,
+            "stdout": "",
+            "stderr": "sh: 1: /etc/passwd: Permission denied",
+        }
+
+        with pytest.raises(PermissionError):
+            await env.exec(["/etc/passwd"])
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_write_file_success(self, mock_vagrant, mock_sandbox_dir):
         """Test successful file writing."""
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
