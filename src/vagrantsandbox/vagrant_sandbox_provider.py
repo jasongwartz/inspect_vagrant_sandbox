@@ -476,8 +476,9 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         vagrant = Vagrant(root=str(sandbox_dir), env=vagrant_env)
 
         # Get available VMs before starting them
-        # list[str | None] because [None] is used below as the sentinel for a
-        # single-VM Vagrantfile (list is invariant, so a copy is needed).
+        # list[str | None] because when no VMs are discovered, [None] is used
+        # below to mean "the default VM" (list is invariant, so a copy is
+        # needed to widen the element type).
         vm_names: list[str | None] = list(await vagrant.get_vm_names())
         cls.logger.debug(f"Discovered VMs in Vagrantfile: {vm_names}")
 
