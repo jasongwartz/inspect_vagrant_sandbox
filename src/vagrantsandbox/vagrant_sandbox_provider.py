@@ -54,7 +54,7 @@ def _get_max_vagrant_startups() -> int | None:
     return None
 
 
-def _startup_semaphore() -> AsyncContextManager[None]:
+def _startup_semaphore() -> AsyncContextManager[object]:
     """Limit concurrent vagrant up operations.
 
     Vagrant up is resource-intensive (disk I/O, CPU, memory allocation).
@@ -801,10 +801,11 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         cmd: list[str],
         input: str | bytes | None = None,
         cwd: str | None = None,
-        env: dict[str, str] = {},
+        env: dict[str, str] | None = None,
         user: str | None = None,
         timeout: int | None = None,
         timeout_retry: bool = True,
+        concurrency: bool = True,
     ) -> ExecResult[str]:
         command = shlex.join(cmd)
         if env:

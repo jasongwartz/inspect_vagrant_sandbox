@@ -55,7 +55,7 @@ def test_inspect_eval() -> None:
                 ModelOutput.for_tool_call(
                     model="mockllm/model",
                     tool_name="bash",
-                    tool_arguments={"cmd": "uname -a"},
+                    tool_arguments={"command": "uname -a"},
                     # Extra quotes no longer needed: shlex.join() now handles
                     # shell escaping (previously ' '.join() required manual quoting)
                 ),
