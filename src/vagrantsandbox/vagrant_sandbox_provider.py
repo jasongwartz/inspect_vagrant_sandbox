@@ -809,6 +809,11 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
     ) -> ExecResult[str]:
         command = shlex.join(cmd)
         if env:
+            # Keys go into the shell unquoted: `export A B=v` would export B,
+            # and `export X;id;Y=v` would run `id`
+            for key in env:
+                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+                    raise ValueError(f"Invalid environment variable name: {key!r}")
             # `&&`, not `;`: a failing `cd` below must abort the command rather
             # than let it run in the wrong directory
             exports = " ".join(

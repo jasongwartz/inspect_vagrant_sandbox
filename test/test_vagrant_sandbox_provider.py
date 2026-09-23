@@ -545,6 +545,33 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("key", ["A B", "A=B", "X;id;Y", "", "1ABC"])
+    async def test_exec_rejects_invalid_env_names(
+        self, mock_vagrant, mock_sandbox_dir, key
+    ):
+        """Env names that aren't shell variable names never reach the guest."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
+
+        with pytest.raises(ValueError, match="Invalid environment variable name"):
+            await env.exec(["true"], env={key: "value"})
+
+        mock_vagrant.ssh.assert_not_called()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_accepts_valid_env_names(self, mock_vagrant, mock_sandbox_dir):
+        """Lowercase, digits and underscores are fine in env names."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
+
+        await env.exec(["true"], env={"MY_VAR_1": "a", "_lower": "b"})
+
+        command = mock_vagrant.ssh.call_args[1]["command"]
+        assert command == EXEC_PREFIX + "export MY_VAR_1=a && export _lower=b && true"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_exec_forwards_cwd(self, mock_vagrant, mock_sandbox_dir):
         """Test that cwd is applied via cd before the command."""
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
