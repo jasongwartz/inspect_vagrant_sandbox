@@ -596,6 +596,45 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_exec_permission_denied_only_for_the_command_itself(
+        self, tmp_path, mock_sandbox_dir
+    ):
+        """Only a command the shell can't execute raises PermissionError.
+
+        A permission error from inside the command, e.g. a `bash()` tool call
+        running a non-executable script, is returned as the command's result.
+        """
+        vagrant = Vagrant(root=str(tmp_path))
+        vagrant._make_vagrant_command = lambda args: [
+            "sh",
+            "-c",
+            'echo "[fog][WARNING] host noise" >&2; bash -c "$1"',
+            "sh",
+            args[-1],  # the command passed to `vagrant ssh --command`
+        ]
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant)
+        script = tmp_path / "run.sh"
+        script.write_text("echo hi\n")
+        script.chmod(0o644)
+
+        with pytest.raises(PermissionError):
+            await env.exec([str(script)])
+        with pytest.raises(PermissionError):
+            await env.exec(["./run.sh"], cwd=str(tmp_path), env={"KEY": "value"})
+
+        result = await env.exec(["bash", "--login", "-c", str(script)])
+        assert result.returncode == 126
+        assert result.stderr.endswith(f"{script}: Permission denied\n")
+
+        result = await env.exec(["sh", "-c", "./run.sh"], cwd=str(tmp_path))
+        assert result.returncode == 126
+        assert result.stderr.endswith("./run.sh: Permission denied\n")
+
+        result = await env.exec(["sh", "-c", "echo 'Permission denied' >&2; exit 126"])
+        assert (result.returncode, result.stderr) == (126, "Permission denied\n")
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_exec_permission_denied_error_fields(
         self, mock_vagrant, mock_sandbox_dir
     ):
