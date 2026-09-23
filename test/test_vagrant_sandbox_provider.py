@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import errno
 import os
 import subprocess
 from unittest.mock import AsyncMock, Mock, patch
@@ -631,6 +632,30 @@ class TestVagrantSandboxEnvironment:
 
         result = await env.exec(["sh", "-c", "echo 'Permission denied' >&2; exit 126"])
         assert (result.returncode, result.stderr) == (126, "Permission denied\n")
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_permission_denied_error_fields(
+        self, mock_vagrant, mock_sandbox_dir
+    ):
+        """The PermissionError has errno fields for the command, no env values.
+
+        Inspect shows the model `f"{ex.strerror}."` plus the filename.
+        """
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {
+            "returncode": 126,
+            "stdout": "",
+            "stderr": "bash: line 1: /etc/passwd: Permission denied\n",
+        }
+
+        with pytest.raises(PermissionError) as exc_info:
+            await env.exec(["/etc/passwd"], env={"API_KEY": "s3cret-value"})
+
+        assert exc_info.value.errno == errno.EACCES
+        assert exc_info.value.strerror == "Permission denied"
+        assert exc_info.value.filename == "/etc/passwd"
+        assert "s3cret-value" not in str(exc_info.value)
 
     @pytest.mark.unit
     @pytest.mark.asyncio

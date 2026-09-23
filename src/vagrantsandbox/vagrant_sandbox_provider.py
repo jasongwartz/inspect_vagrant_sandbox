@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import errno
 import os
 import re
 import shlex
@@ -860,7 +861,7 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                     f": {cmd[0]}: Permission denied"
                 )
             ):
-                raise PermissionError(f"Permission denied executing command: {command}")
+                raise PermissionError(errno.EACCES, "Permission denied", cmd[0])
             verify_exec_result_size(exec_result)
             return exec_result
 
