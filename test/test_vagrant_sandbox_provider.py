@@ -21,6 +21,9 @@ from vagrantsandbox.vagrant_sandbox_provider import (
     _startup_semaphore,
 )
 
+# exec() prints a marker to the guest's stderr before running the command.
+EXEC_PREFIX = f"echo {VagrantSandboxEnvironment.STDERR_MARKER} >&2; "
+
 
 # Shared fixtures and test data
 @pytest.fixture
@@ -404,7 +407,7 @@ class TestVagrantSandboxEnvironment:
         assert result.stdout == "command output"
         assert result.stderr == ""
         mock_vagrant.ssh.assert_called_once_with(
-            vm_name=None, command="ls -la", input=None, timeout=None
+            vm_name=None, command=EXEC_PREFIX + "ls -la", input=None, timeout=None
         )
 
     @pytest.mark.unit
@@ -426,6 +429,76 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_exec_drops_host_warnings_before_marker(
+        self, mock_vagrant, mock_sandbox_dir
+    ):
+        """Vagrant's own warnings precede the marker; only what follows is returned."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {
+            "returncode": 0,
+            "stdout": "boof\n",
+            "stderr": "[fog][WARNING] Unrecognized arguments: libvirt_ip_command\n"
+            f"{VagrantSandboxEnvironment.STDERR_MARKER}\nbaz\n",
+        }
+
+        result = await env.exec(["sh", "-c", "echo boof; echo baz >&2"])
+
+        assert result.stdout == "boof\n"
+        assert result.stderr == "baz\n"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_keeps_stderr_without_marker(
+        self, mock_vagrant, mock_sandbox_dir
+    ):
+        """If ssh failed before the command ran, all of stderr is returned."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        ssh_error = "ssh: connect to host 192.168.121.5 port 22: Connection refused\n"
+        mock_vagrant.ssh.return_value = {
+            "returncode": 255,
+            "stdout": "",
+            "stderr": ssh_error,
+        }
+
+        result = await env.exec(["ls"])
+
+        assert result.stderr == ssh_error
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_through_real_shell(self, tmp_path, mock_sandbox_dir):
+        """exec() against a stand-in for `vagrant ssh -c` that runs a real shell.
+
+        Like vagrant, the stand-in prints a warning to stderr, then runs the
+        command on the same stdout and stderr.
+        """
+        vagrant = Vagrant(root=str(tmp_path))
+        vagrant._make_vagrant_command = lambda args: [
+            "sh",
+            "-c",
+            'echo "[fog][WARNING] host noise" >&2; bash -c "$1"',
+            "sh",
+            args[-1],  # the command passed to `vagrant ssh --command`
+        ]
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant)
+
+        result = await env.exec(["sh", "-c", "echo boof; echo baz >&2"])
+        assert (result.returncode, result.stdout, result.stderr) == (
+            0,
+            "boof\n",
+            "baz\n",
+        )
+
+        result = await env.exec(["exit", "3"])
+        assert (result.returncode, result.stderr) == (3, "")
+
+        result = await env.exec(["true"], cwd="/nonexistent")
+        assert result.returncode != 0
+        assert "/nonexistent" in result.stderr
+        assert "host noise" not in result.stderr
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_exec_escapes_shell_metacharacters(
         self, mock_vagrant, mock_sandbox_dir
     ):
@@ -436,7 +509,7 @@ class TestVagrantSandboxEnvironment:
         await env.exec(["bash", "-c", "ls && cat /etc/passwd"])
 
         call_args = mock_vagrant.ssh.call_args
-        command = call_args[1]["command"]
+        command = call_args[1]["command"].removeprefix(EXEC_PREFIX)
         # shlex.join should quote the argument containing &&
         assert "&&" not in command.split("'")[0], "Metacharacters should be quoted"
         assert "'ls && cat /etc/passwd'" in command
@@ -453,7 +526,7 @@ class TestVagrantSandboxEnvironment:
 
         await env.exec(["echo", f"test {metachar} injection"])
 
-        command = mock_vagrant.ssh.call_args[1]["command"]
+        command = mock_vagrant.ssh.call_args[1]["command"].removeprefix(EXEC_PREFIX)
         # The metacharacter should appear inside quotes, not bare
         assert command.startswith("echo "), "Command should start with 'echo '"
         assert metachar not in command.split("'")[0], f"{metachar} should be quoted"
@@ -468,7 +541,7 @@ class TestVagrantSandboxEnvironment:
         await env.exec(["printenv", "MY_VAR"], env={"MY_VAR": "my value"})
 
         command = mock_vagrant.ssh.call_args[1]["command"]
-        assert command == "export MY_VAR='my value' && printenv MY_VAR"
+        assert command == EXEC_PREFIX + "export MY_VAR='my value' && printenv MY_VAR"
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -480,7 +553,7 @@ class TestVagrantSandboxEnvironment:
         await env.exec(["ls"], cwd="/usr/bin")
 
         command = mock_vagrant.ssh.call_args[1]["command"]
-        assert command == "cd /usr/bin && ls"
+        assert command == EXEC_PREFIX + "cd /usr/bin && ls"
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -492,7 +565,7 @@ class TestVagrantSandboxEnvironment:
         await env.exec(["ls"], cwd="/missing", env={"MY_VAR": "value"})
 
         command = mock_vagrant.ssh.call_args[1]["command"]
-        assert command == "cd /missing && export MY_VAR=value && ls"
+        assert command == EXEC_PREFIX + "cd /missing && export MY_VAR=value && ls"
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -504,7 +577,7 @@ class TestVagrantSandboxEnvironment:
         await env.exec(["whoami"], user="root", cwd="/tmp")
 
         command = mock_vagrant.ssh.call_args[1]["command"]
-        assert command == "sudo -H -n -u root sh -c 'cd /tmp && whoami'"
+        assert command == EXEC_PREFIX + "sudo -H -n -u root sh -c 'cd /tmp && whoami'"
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -949,7 +1022,7 @@ class TestTimeoutHandling:
 
         assert result.success is True
         mock_vagrant.ssh.assert_called_once_with(
-            vm_name=None, command="ls -la", input=None, timeout=120
+            vm_name=None, command=EXEC_PREFIX + "ls -la", input=None, timeout=120
         )
 
     @pytest.mark.unit

@@ -14,6 +14,7 @@ from typing import (
     Any,
     Callable,
     Coroutine,
+    Final,
     Literal,
     TypedDict,
     TypeVar,
@@ -405,6 +406,14 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
     logger = getLogger(__name__)
 
     TRACE_NAME = "vagrant_sandbox_environment"
+
+    # Printed to the guest's stderr just before exec() runs the command.
+    # `vagrant ssh` prints its own warnings (e.g. fog's under libvirt, while
+    # it looks up the VM) before it starts ssh, and ssh then writes to the
+    # same stderr, so only what follows the marker is the command's stderr.
+    # Anything vagrant prints after ssh exits (e.g. a user-defined `after`
+    # trigger in the Vagrantfile) would still be included.
+    STDERR_MARKER: Final = "__inspect_vagrant_stderr_8f2c41a6__"
 
     vagrant: Vagrant
 
@@ -819,14 +828,22 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             "exec_command ",
         ):
             result = await self.vagrant.ssh(
-                vm_name=self.vm_name, command=command, input=input, timeout=timeout
+                vm_name=self.vm_name,
+                command=f"echo {self.STDERR_MARKER} >&2; {command}",
+                input=input,
+                timeout=timeout,
             )
 
+            # No marker means ssh failed before the command ran: keep all of
+            # stderr so the failure stays debuggable.
+            _, marker, guest_stderr = result["stderr"].partition(
+                f"{self.STDERR_MARKER}\n"
+            )
             exec_result = ExecResult(
                 success=result["returncode"] == 0,
                 returncode=result["returncode"],
                 stdout=result["stdout"],
-                stderr=result["stderr"],
+                stderr=guest_stderr if marker else result["stderr"],
             )
             if (
                 exec_result.returncode == 126
