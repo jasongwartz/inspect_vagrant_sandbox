@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import errno
 import os
 import re
 import shlex
@@ -863,11 +864,11 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
     ) -> None:
         """Map a failed file operation to the errno-style exceptions Inspect expects."""
         if "No such file or directory" in stderr:
-            raise FileNotFoundError(f"No such file or directory: {file}")
+            raise FileNotFoundError(errno.ENOENT, "No such file or directory", file)
         if "Is a directory" in stderr:
-            raise IsADirectoryError(f"Is a directory: {file}")
+            raise IsADirectoryError(errno.EISDIR, "Is a directory", file)
         if "Permission denied" in stderr:
-            raise PermissionError(f"Permission denied: {file}")
+            raise PermissionError(errno.EACCES, "Permission denied", file)
         raise subprocess.CalledProcessError(returncode, command, stdout, stderr)
 
     @override
