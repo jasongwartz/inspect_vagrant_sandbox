@@ -466,6 +466,39 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_exec_through_real_shell(self, tmp_path, mock_sandbox_dir):
+        """exec() against a stand-in for `vagrant ssh -c` that runs a real shell.
+
+        Like vagrant, the stand-in prints a warning to stderr, then runs the
+        command on the same stdout and stderr.
+        """
+        vagrant = Vagrant(root=str(tmp_path))
+        vagrant._make_vagrant_command = lambda args: [
+            "sh",
+            "-c",
+            'echo "[fog][WARNING] host noise" >&2; bash -c "$1"',
+            "sh",
+            args[-1],  # the command passed to `vagrant ssh --command`
+        ]
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant)
+
+        result = await env.exec(["sh", "-c", "echo boof; echo baz >&2"])
+        assert (result.returncode, result.stdout, result.stderr) == (
+            0,
+            "boof\n",
+            "baz\n",
+        )
+
+        result = await env.exec(["exit", "3"])
+        assert (result.returncode, result.stderr) == (3, "")
+
+        result = await env.exec(["true"], cwd="/nonexistent")
+        assert result.returncode != 0
+        assert "/nonexistent" in result.stderr
+        assert "host noise" not in result.stderr
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_exec_escapes_shell_metacharacters(
         self, mock_vagrant, mock_sandbox_dir
     ):

@@ -411,6 +411,8 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
     # `vagrant ssh` prints its own warnings (e.g. fog's under libvirt, while
     # it looks up the VM) before it starts ssh, and ssh then writes to the
     # same stderr, so only what follows the marker is the command's stderr.
+    # Anything vagrant prints after ssh exits (e.g. a user-defined `after`
+    # trigger in the Vagrantfile) would still be included.
     STDERR_MARKER: Final = "__inspect_vagrant_stderr_8f2c41a6__"
 
     vagrant: Vagrant
