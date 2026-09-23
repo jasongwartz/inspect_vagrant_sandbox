@@ -762,6 +762,43 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_file_ops_run_in_c_locale(self, tmp_path, mock_sandbox_dir):
+        """Errors are mapped from English messages, so file operations must run
+        in the C locale even when ssh forwards a German one from the host."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        # Stand-ins for stat and base64 that fail like localized ones would
+        for tool in ("stat", "base64"):
+            fake = bin_dir / tool
+            fake.write_text(
+                "#!/bin/sh\n"
+                'if [ "$LC_ALL" = C ]; then msg="No such file or directory"\n'
+                'else msg="Datei oder Verzeichnis nicht gefunden"; fi\n'
+                f'echo "{tool}: $msg" >&2\n'
+                "exit 1\n"
+            )
+            fake.chmod(0o755)
+        vagrant = Vagrant(
+            root=str(tmp_path),
+            env={
+                **os.environ,
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                "LANG": "de_DE.UTF-8",
+                "LC_ALL": "de_DE.UTF-8",
+            },
+        )
+        # Run the command passed to `vagrant ssh --command` in a real shell
+        vagrant._make_vagrant_command = lambda args: ["bash", "-c", args[-1]]
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant)
+        file = str(tmp_path / "file.txt")
+
+        with pytest.raises(FileNotFoundError):
+            await env.read_file(file)  # fails in stat
+        with pytest.raises(FileNotFoundError):
+            await env.write_file(file, "content")  # fails in base64
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_connection(self, mock_vagrant, mock_sandbox_dir):
         """Test connection method."""
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
