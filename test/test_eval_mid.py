@@ -1,6 +1,6 @@
 from inspect_ai import Task, eval, task
 from inspect_ai.dataset import Sample
-from inspect_ai.model import ModelOutput, get_model
+from inspect_ai.model import ChatMessageTool, ModelOutput, get_model
 from inspect_ai.scorer import includes
 from inspect_ai.solver import basic_agent
 from inspect_ai.tool import bash
@@ -72,10 +72,22 @@ def test_inspect_eval() -> None:
     assert len(eval_logs) == 1
     assert eval_logs[0]
     assert eval_logs[0].error is None
+    assert eval_logs[0].status == "success"
     assert eval_logs[0].samples
+    for sample in eval_logs[0].samples:
+        assert sample.error is None, f"sample {sample.id} errored: {sample.error}"
     sample = eval_logs[0].samples[0]
-    tool_calls = [x for x in sample.messages if x.role == "tool"]
-    assert "ubuntu" in tool_calls[0].text
+    bash_outputs = [
+        x
+        for x in sample.messages
+        if isinstance(x, ChatMessageTool) and x.function == "bash"
+    ]
+    assert bash_outputs, "no bash tool output recorded in sample messages"
+    assert bash_outputs[0].error is None, (
+        f"bash tool call failed: {bash_outputs[0].error}"
+    )
+    # `uname -a` must have actually executed in the sandbox VM
+    assert "ubuntu" in bash_outputs[0].text
 
 
 if __name__ == "__main__":
