@@ -857,29 +857,39 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             self._verify_exec_output_size(exec_result)
             return exec_result
 
-    @staticmethod
-    def _verify_exec_output_size(exec_result: ExecResult[str]) -> None:
-        """Raise OutputLimitExceededError if stdout or stderr is over Inspect's limit.
+    # _verify_exec_output_size() and _truncate_middle() are a port of
+    # inspect_ai 0.3.123's private verify_exec_result_size() and
+    # truncate_string_to_bytes(), which can't be imported: 0.3.183 removed the
+    # former. From 0.3.183 on, Inspect runs this check itself for every
+    # provider, so these can go once we require inspect_ai >= 0.3.183.
 
-        Same check as inspect_ai's private verify_exec_result_size(), which
-        inspect_ai 0.3.183 removed: each stream is measured in UTF-8 bytes, and
-        an over-limit stream is reported as its first and last half-limit bytes.
-        """
+    @classmethod
+    def _verify_exec_output_size(cls, exec_result: ExecResult[str]) -> None:
+        """Raise OutputLimitExceededError if stdout or stderr is over Inspect's limit."""
         limit = SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE
-        streams = [exec_result.stdout, exec_result.stderr]
-        encoded = [s.encode("utf-8", errors="replace") for s in streams]
-        if all(len(e) <= limit for e in encoded):
+        truncated_stdout = cls._truncate_middle(exec_result.stdout, limit)
+        truncated_stderr = cls._truncate_middle(exec_result.stderr, limit)
+        if truncated_stdout is None and truncated_stderr is None:
             return
-        half = limit // 2
+        stdout = exec_result.stdout if truncated_stdout is None else truncated_stdout
+        stderr = exec_result.stderr if truncated_stderr is None else truncated_stderr
         raise OutputLimitExceededError(
             limit_str=SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE_STR,
-            truncated_output="".join(
-                s
-                if len(e) <= limit
-                else (e[:half] + e[-(limit - half) :]).decode("utf-8", errors="replace")
-                for s, e in zip(streams, encoded)
-            ),
+            truncated_output=f"{stdout}{stderr}",
         )
+
+    @staticmethod
+    def _truncate_middle(text: str, max_bytes: int) -> str | None:
+        """Cut text to max_bytes of UTF-8, keeping its start and end.
+
+        Returns None if text already fits.
+        """
+        encoded = text.encode("utf-8", errors="replace")
+        if len(encoded) <= max_bytes:
+            return None
+        start = encoded[: max_bytes // 2]
+        end = encoded[len(encoded) - (max_bytes - len(start)) :]
+        return (start + end).decode("utf-8", errors="replace")
 
     @staticmethod
     def _raise_file_error(
