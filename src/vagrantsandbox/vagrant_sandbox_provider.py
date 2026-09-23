@@ -37,7 +37,6 @@ from inspect_ai.util import (
     sandboxenv,
     trace_action,
 )
-from inspect_ai.util._sandbox.limits import verify_exec_result_size
 from inspect_ai.util._subprocess import default_max_subprocesses
 from platformdirs import user_cache_dir
 from pydantic import BaseModel, Field, field_validator
@@ -854,8 +853,32 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                 in (exec_result.stdout + exec_result.stderr).lower()
             ):
                 raise PermissionError(f"Permission denied executing command: {command}")
-            verify_exec_result_size(exec_result)
+            self._verify_exec_output_size(exec_result)
             return exec_result
+
+    @staticmethod
+    def _verify_exec_output_size(exec_result: ExecResult[str]) -> None:
+        """Raise OutputLimitExceededError if stdout or stderr is over Inspect's limit.
+
+        Same check as inspect_ai's private verify_exec_result_size(), which
+        inspect_ai 0.3.183 removed: each stream is measured in UTF-8 bytes, and
+        an over-limit stream is reported as its first and last half-limit bytes.
+        """
+        limit = SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE
+        streams = [exec_result.stdout, exec_result.stderr]
+        encoded = [s.encode("utf-8", errors="replace") for s in streams]
+        if all(len(e) <= limit for e in encoded):
+            return
+        half = limit // 2
+        raise OutputLimitExceededError(
+            limit_str=SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE_STR,
+            truncated_output="".join(
+                s
+                if len(e) <= limit
+                else (e[:half] + e[-(limit - half) :]).decode("utf-8", errors="replace")
+                for s, e in zip(streams, encoded)
+            ),
+        )
 
     @staticmethod
     def _raise_file_error(

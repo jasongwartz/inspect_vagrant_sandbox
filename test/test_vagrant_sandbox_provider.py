@@ -609,6 +609,58 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_exec_stderr_over_limit(self, mock_vagrant, mock_sandbox_dir):
+        """stderr has its own 10 MiB limit; the error keeps both ends of it."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        limit = 10 * 1024**2
+        mock_vagrant.ssh.return_value = {
+            "returncode": 1,
+            "stdout": "out",
+            "stderr": "<" + "x" * limit + ">",
+        }
+
+        with pytest.raises(OutputLimitExceededError) as exc_info:
+            await env.exec(["cat", "big"])
+
+        assert exc_info.value.limit_str == "10 MiB"
+        assert exc_info.value.truncated_output == "out<" + "x" * (limit - 2) + ">"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_output_over_limit_in_bytes(
+        self, mock_vagrant, mock_sandbox_dir
+    ):
+        """The limit counts UTF-8 bytes, not characters."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {
+            "returncode": 0,
+            "stdout": "é" * (5 * 1024**2 + 1),  # 10 MiB + 2 bytes
+            "stderr": "",
+        }
+
+        with pytest.raises(OutputLimitExceededError):
+            await env.exec(["cat", "big"])
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_output_at_limit(self, mock_vagrant, mock_sandbox_dir):
+        """Each stream may be exactly 10 MiB."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        stdout = "x" * (10 * 1024**2)
+        stderr = "é" * (5 * 1024**2)  # 10 MiB
+        mock_vagrant.ssh.return_value = {
+            "returncode": 0,
+            "stdout": stdout,
+            "stderr": stderr,
+        }
+
+        result = await env.exec(["cat", "big"])
+
+        assert result.stdout == stdout
+        assert result.stderr == stderr
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_write_file_success(self, mock_vagrant, mock_sandbox_dir):
         """Test successful file writing."""
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
