@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import subprocess
 from unittest.mock import AsyncMock, Mock, patch
@@ -8,12 +9,14 @@ from pathlib import Path
 from inspect_ai.util._concurrency import init_concurrency
 
 from vagrantsandbox.vagrant_sandbox_provider import (
+    SANDBOX_OWNER_FILE_NAME,
     Vagrant,
     VagrantSandboxEnvironment,
     VagrantSandboxEnvironmentConfig,
     SandboxDirectory,
     SandboxUnrecoverableError,
     TimeoutConfig,
+    _RUN_OWNER_ID,
     _run_in_executor,
     _get_max_vagrant_startups,
     _startup_semaphore,
@@ -1049,6 +1052,76 @@ class TestVagrantStartupThrottle:
                 )
             # Reset concurrency registry to not affect other tests
             init_concurrency()
+
+
+class TestTaskCleanup:
+    """task_cleanup must not touch sandboxes belonging to other eval processes."""
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_sandbox_directory_records_owner(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("INSPECT_SANDBOX_CACHE_DIR", str(tmp_path))
+
+        sandbox = await SandboxDirectory.create(sample_id="sample1")
+
+        owner_data = json.loads((sandbox.path / SANDBOX_OWNER_FILE_NAME).read_text())
+        assert owner_data["owner"] == _RUN_OWNER_ID
+        assert owner_data["pid"] == os.getpid()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_task_cleanup_only_removes_own_sandboxes(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("INSPECT_SANDBOX_CACHE_DIR", str(tmp_path))
+
+        # A leftover from this run (its sample_cleanup never completed)
+        ours = await SandboxDirectory.create(sample_id="ours")
+
+        # A sandbox owned by a concurrent eval running in another process
+        theirs = tmp_path / "concurrent-eval"
+        theirs.mkdir()
+        (theirs / SANDBOX_OWNER_FILE_NAME).write_text(
+            json.dumps({"owner": "99999-deadbeef", "pid": 99999})
+        )
+
+        # A stray with no recorded owner (e.g. created by an older version)
+        unowned = tmp_path / "unowned-stray"
+        unowned.mkdir()
+
+        cleaned = []
+
+        async def fake_cleanup(path):
+            cleaned.append(path)
+
+        monkeypatch.setattr(
+            "vagrantsandbox.vagrant_sandbox_provider.cleanup_sandbox_with_vms",
+            fake_cleanup,
+        )
+        await VagrantSandboxEnvironment.task_cleanup("task", None, cleanup=True)
+
+        assert cleaned == [ours.path]
+        assert theirs.exists()
+        assert unowned.exists()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_task_cleanup_without_cleanup_lists_all(self, tmp_path, monkeypatch):
+        """The informational branch reports strays but destroys nothing."""
+        monkeypatch.setenv("INSPECT_SANDBOX_CACHE_DIR", str(tmp_path))
+        (tmp_path / "a-stray-sandbox").mkdir()
+
+        cleaned = []
+
+        async def fake_cleanup(path):
+            cleaned.append(path)
+
+        monkeypatch.setattr(
+            "vagrantsandbox.vagrant_sandbox_provider.cleanup_sandbox_with_vms",
+            fake_cleanup,
+        )
+        await VagrantSandboxEnvironment.task_cleanup("task", None, cleanup=False)
+
+        assert cleaned == []
+        assert (tmp_path / "a-stray-sandbox").exists()
 
 
 class TestSampleIdHandling:
