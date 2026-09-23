@@ -863,7 +863,19 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
            ConnectionError: If sandbox is not currently running.
         """
         sandbox_path = str(self.sandbox_dir)
-        return SandboxConnection(
-            type="vagrant",
-            command=f"VAGRANT_CWD={sandbox_path} vagrant ssh",
-        )
+        command = f"VAGRANT_CWD={shlex.quote(sandbox_path)} vagrant ssh"
+        vm_suffix = (self.vagrant.env or {}).get("INSPECT_VM_SUFFIX")
+        if vm_suffix:
+            # The test/sample Vagrantfiles derive machine names from
+            # INSPECT_VM_SUFFIX, so vagrant must re-evaluate the Vagrantfile
+            # with the same suffix or it won't find the created machine.
+            command = f"INSPECT_VM_SUFFIX={shlex.quote(vm_suffix)} {command}"
+        if self.vm_name is not None:
+            # Without the VM name, `vagrant ssh` fails in a multi-VM environment
+            command = f"{command} {shlex.quote(self.vm_name)}"
+        if user is not None:
+            # `vagrant ssh` always logs in as the box's ssh user, so switch to
+            # the requested user with a sudo login shell.
+            login = f"sudo -u {shlex.quote(user)} -i"
+            command = f"{command} -c {shlex.quote(login)}"
+        return SandboxConnection(type="vagrant", command=command)

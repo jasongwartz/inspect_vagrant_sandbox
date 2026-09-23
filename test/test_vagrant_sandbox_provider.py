@@ -28,6 +28,7 @@ def mock_vagrant():
     vagrant.ssh = AsyncMock()
     vagrant.up = Mock()
     vagrant.destroy = Mock()
+    vagrant.env = {}
     return vagrant
 
 
@@ -535,6 +536,41 @@ class TestVagrantSandboxEnvironment:
 
         assert connection.type == "vagrant"
         assert connection.command.endswith("vagrant ssh")
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_connection_names_the_vm(self, mock_vagrant, mock_sandbox_dir):
+        """A multi-VM environment needs the VM name to connect to."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "web")
+
+        connection = await env.connection()
+
+        assert connection.command.endswith("vagrant ssh web")
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_connection_as_user(self, mock_vagrant, mock_sandbox_dir):
+        """Test that the requested user is used, not the box's ssh user."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+
+        connection = await env.connection(user="root")
+
+        assert connection.command.endswith("vagrant ssh -c 'sudo -u root -i'")
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_connection_includes_vm_suffix(self, mock_vagrant, mock_sandbox_dir):
+        """INSPECT_VM_SUFFIX must be set or vagrant can't resolve machine names.
+
+        Vagrantfiles derive machine names from INSPECT_VM_SUFFIX, so the
+        pasted command must re-evaluate the Vagrantfile with the same value.
+        """
+        mock_vagrant.env = {"INSPECT_VM_SUFFIX": "-abc-12345678"}
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+
+        connection = await env.connection()
+
+        assert connection.command.startswith("INSPECT_VM_SUFFIX=-abc-12345678 ")
 
     @pytest.mark.unit
     @pytest.mark.asyncio
