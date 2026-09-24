@@ -33,7 +33,6 @@ from inspect_ai.util import (
     sandboxenv,
     trace_action,
 )
-from inspect_ai.util._subprocess import default_max_subprocesses
 from platformdirs import user_cache_dir
 from pydantic import BaseModel, Field, field_validator
 from vagrant import Status, Vagrant as BaseVagrant
@@ -418,10 +417,10 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
     def default_concurrency(cls) -> int | None:
         """Default concurrent sandbox limit for vagrant environments.
 
-        VMs are resource-intensive, so limit to cpu_count().
+        VMs are resource-intensive, so limit to process_cpu_count().
         Can be overridden via --max-sandboxes flag.
         """
-        return default_max_subprocesses()
+        return os.process_cpu_count() or 1
 
     @classmethod
     async def task_init(

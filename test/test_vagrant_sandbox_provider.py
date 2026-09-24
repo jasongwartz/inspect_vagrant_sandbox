@@ -613,14 +613,17 @@ class TestDefaultConcurrency:
 
     @pytest.mark.unit
     def test_default_concurrency_returns_cpu_count(self):
-        """Test that default_concurrency returns default_max_subprocesses value."""
-        with patch(
-            "vagrantsandbox.vagrant_sandbox_provider.default_max_subprocesses",
-            return_value=8,
-        ) as mock_default:
+        """Test that default_concurrency returns os.process_cpu_count()."""
+        with patch("os.process_cpu_count", return_value=3) as mock_count:
             result = VagrantSandboxEnvironment.default_concurrency()
-            mock_default.assert_called_once()
-            assert result == 8
+            mock_count.assert_called_once()
+            assert result == 3
+
+    @pytest.mark.unit
+    def test_default_concurrency_unknown_cpu_count(self):
+        """Test that default_concurrency falls back to 1 when the count is unknown."""
+        with patch("os.process_cpu_count", return_value=None):
+            assert VagrantSandboxEnvironment.default_concurrency() == 1
 
 
 @pytest.mark.unit
