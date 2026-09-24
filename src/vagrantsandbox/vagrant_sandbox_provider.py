@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import errno
 import os
 import re
 import shlex
@@ -848,12 +849,19 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                 stdout=result["stdout"],
                 stderr=guest_stderr if marker else result["stderr"],
             )
+            # Raise only if the shell could not execute cmd[0] itself (bash:
+            # "bash: line 1: /etc/passwd: Permission denied", dash under
+            # `user`: "sh: 1: /etc/passwd: Permission denied"). The same error
+            # from inside the command, e.g. `bash -c ./script.sh`, is the
+            # command's own result.
             if (
                 exec_result.returncode == 126
-                and "permission denied"
-                in (exec_result.stdout + exec_result.stderr).lower()
+                and cmd
+                and exec_result.stderr.rstrip().endswith(
+                    f": {cmd[0]}: Permission denied"
+                )
             ):
-                raise PermissionError(f"Permission denied executing command: {command}")
+                raise PermissionError(errno.EACCES, "Permission denied", cmd[0])
             self._verify_exec_output_size(exec_result)
             return exec_result
 
