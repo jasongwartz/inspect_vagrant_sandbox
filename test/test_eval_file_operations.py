@@ -142,7 +142,7 @@ async def test_eval_read_system_file():
                                 {
                                     "id": "call_1",
                                     "function": "bash",
-                                    "arguments": {"cmd": "cat /etc/os-release"},
+                                    "arguments": {"command": "cat /etc/os-release"},
                                     "type": "function",
                                 }
                             ],
@@ -185,7 +185,7 @@ async def test_eval_multiple_file_reads():
                                 {
                                     "id": "c1",
                                     "function": "bash",
-                                    "arguments": {"cmd": "cat /etc/os-release"},
+                                    "arguments": {"command": "cat /etc/os-release"},
                                     "type": "function",
                                 }
                             ],
@@ -199,7 +199,7 @@ async def test_eval_multiple_file_reads():
                                 {
                                     "id": "c2",
                                     "function": "bash",
-                                    "arguments": {"cmd": "cat /etc/hostname"},
+                                    "arguments": {"command": "cat /etc/hostname"},
                                     "type": "function",
                                 }
                             ],
@@ -213,7 +213,7 @@ async def test_eval_multiple_file_reads():
                                 {
                                     "id": "c3",
                                     "function": "bash",
-                                    "arguments": {"cmd": "cat /proc/cpuinfo"},
+                                    "arguments": {"command": "cat /proc/cpuinfo"},
                                     "type": "function",
                                 }
                             ],
@@ -251,7 +251,7 @@ async def test_eval_mixed_command_workflow():
                                 {
                                     "id": "c1",
                                     "function": "bash",
-                                    "arguments": {"cmd": "pwd"},
+                                    "arguments": {"command": "pwd"},
                                     "type": "function",
                                 }
                             ],
@@ -264,7 +264,7 @@ async def test_eval_mixed_command_workflow():
                                 {
                                     "id": "c2",
                                     "function": "bash",
-                                    "arguments": {"cmd": "whoami"},
+                                    "arguments": {"command": "whoami"},
                                     "type": "function",
                                 }
                             ],
@@ -277,7 +277,7 @@ async def test_eval_mixed_command_workflow():
                                 {
                                     "id": "c3",
                                     "function": "bash",
-                                    "arguments": {"cmd": "cat /etc/os-release"},
+                                    "arguments": {"command": "cat /etc/os-release"},
                                     "type": "function",
                                 }
                             ],
@@ -290,7 +290,7 @@ async def test_eval_mixed_command_workflow():
                                 {
                                     "id": "c4",
                                     "function": "bash",
-                                    "arguments": {"cmd": "uname -a"},
+                                    "arguments": {"command": "uname -a"},
                                     "type": "function",
                                 }
                             ],
@@ -303,7 +303,7 @@ async def test_eval_mixed_command_workflow():
                                 {
                                     "id": "c5",
                                     "function": "bash",
-                                    "arguments": {"cmd": "cat /etc/hostname"},
+                                    "arguments": {"command": "cat /etc/hostname"},
                                     "type": "function",
                                 }
                             ],
