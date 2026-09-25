@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import errno
 import os
 import re
 import shlex
@@ -37,7 +38,6 @@ from inspect_ai.util import (
     sandboxenv,
     trace_action,
 )
-from inspect_ai.util._sandbox.limits import verify_exec_result_size
 from inspect_ai.util._subprocess import default_max_subprocesses
 from platformdirs import user_cache_dir
 from pydantic import BaseModel, Field, field_validator
@@ -415,6 +415,12 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
     # Anything vagrant prints after ssh exits (e.g. a user-defined `after`
     # trigger in the Vagrantfile) would still be included.
     STDERR_MARKER: Final = "__inspect_vagrant_stderr_8f2c41a6__"
+
+    # Printed to the guest's stdout around read_file()'s base64 output.
+    # Anything else on stdout (e.g. an `echo` in the guest's ~/.bashrc or a
+    # Vagrantfile trigger) must not be decoded into the file's contents.
+    READ_FILE_START_MARKER: Final = "__inspect_vagrant_read_file_start_8f2c41a6__"
+    READ_FILE_END_MARKER: Final = "__inspect_vagrant_read_file_end_8f2c41a6__"
 
     vagrant: Vagrant
 
@@ -810,6 +816,11 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
     ) -> ExecResult[str]:
         command = shlex.join(cmd)
         if env:
+            # Keys go into the shell unquoted: `export A B=v` would export B,
+            # and `export X;id;Y=v` would run `id`
+            for key in env:
+                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+                    raise ValueError(f"Invalid environment variable name: {key!r}")
             # `&&`, not `;`: a failing `cd` below must abort the command rather
             # than let it run in the wrong directory
             exports = " ".join(
@@ -844,13 +855,20 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                 stdout=result["stdout"],
                 stderr=self._guest_stderr(result["stderr"]),
             )
+            # Raise only if the shell could not execute cmd[0] itself (bash:
+            # "bash: line 1: /etc/passwd: Permission denied", dash under
+            # `user`: "sh: 1: /etc/passwd: Permission denied"). The same error
+            # from inside the command, e.g. `bash -c ./script.sh`, is the
+            # command's own result.
             if (
                 exec_result.returncode == 126
-                and "permission denied"
-                in (exec_result.stdout + exec_result.stderr).lower()
+                and cmd
+                and exec_result.stderr.rstrip().endswith(
+                    f": {cmd[0]}: Permission denied"
+                )
             ):
-                raise PermissionError(f"Permission denied executing command: {command}")
-            verify_exec_result_size(exec_result)
+                raise PermissionError(errno.EACCES, "Permission denied", cmd[0])
+            self._verify_exec_output_size(exec_result)
             return exec_result
 
     def _guest_stderr(self, stderr: str) -> str:
@@ -860,17 +878,51 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         _, marker, guest_stderr = stderr.partition(f"{self.STDERR_MARKER}\n")
         return guest_stderr if marker else stderr
 
+    # _verify_exec_output_size() and _truncate_middle() are a port of
+    # inspect_ai 0.3.123's private verify_exec_result_size() and
+    # truncate_string_to_bytes(), which can't be imported: 0.3.183 removed the
+    # former. From 0.3.183 on, Inspect runs this check itself for every
+    # provider, so these can go once we require inspect_ai >= 0.3.183.
+
+    @classmethod
+    def _verify_exec_output_size(cls, exec_result: ExecResult[str]) -> None:
+        """Raise OutputLimitExceededError if stdout or stderr is over Inspect's limit."""
+        limit = SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE
+        truncated_stdout = cls._truncate_middle(exec_result.stdout, limit)
+        truncated_stderr = cls._truncate_middle(exec_result.stderr, limit)
+        if truncated_stdout is None and truncated_stderr is None:
+            return
+        stdout = exec_result.stdout if truncated_stdout is None else truncated_stdout
+        stderr = exec_result.stderr if truncated_stderr is None else truncated_stderr
+        raise OutputLimitExceededError(
+            limit_str=SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE_STR,
+            truncated_output=f"{stdout}{stderr}",
+        )
+
+    @staticmethod
+    def _truncate_middle(text: str, max_bytes: int) -> str | None:
+        """Cut text to max_bytes of UTF-8, keeping its start and end.
+
+        Returns None if text already fits.
+        """
+        encoded = text.encode("utf-8", errors="replace")
+        if len(encoded) <= max_bytes:
+            return None
+        start = encoded[: max_bytes // 2]
+        end = encoded[len(encoded) - (max_bytes - len(start)) :]
+        return (start + end).decode("utf-8", errors="replace")
+
     @staticmethod
     def _raise_file_error(
         file: str, command: str, returncode: int, stdout: str, stderr: str
     ) -> None:
         """Map a failed file operation to the errno-style exceptions Inspect expects."""
         if "No such file or directory" in stderr:
-            raise FileNotFoundError(f"No such file or directory: {file}")
+            raise FileNotFoundError(errno.ENOENT, "No such file or directory", file)
         if "Is a directory" in stderr:
-            raise IsADirectoryError(f"Is a directory: {file}")
+            raise IsADirectoryError(errno.EISDIR, "Is a directory", file)
         if "Permission denied" in stderr:
-            raise PermissionError(f"Permission denied: {file}")
+            raise PermissionError(errno.EACCES, "Permission denied", file)
         raise subprocess.CalledProcessError(returncode, command, stdout, stderr)
 
     @override
@@ -916,10 +968,13 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         size_limit = SandboxEnvironmentLimits.MAX_READ_FILE_SIZE
         limit_marker = "inspect read_file size limit exceeded"
         command = (
-            f"_size=$(stat -c %s -- {quoted_file}) && "
+            # -L: the size of what base64 reads, not of a symlink itself
+            f"_size=$(stat -L -c %s -- {quoted_file}) && "
             f'{{ [ "$_size" -le {size_limit} ] || '
             f"{{ echo {shlex.quote(limit_marker)} >&2; exit 70; }}; }} && "
-            f"base64 -- {quoted_file}"
+            f"echo {self.READ_FILE_START_MARKER} && "
+            f"base64 -- {quoted_file} && "
+            f"echo {self.READ_FILE_END_MARKER}"
         )
         result = await self.vagrant.ssh(
             vm_name=self.vm_name, command=f"echo {self.STDERR_MARKER} >&2; {command}"
@@ -936,7 +991,14 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                 file, command, result["returncode"], result["stdout"], stderr
             )
 
-        contents = base64.b64decode(result["stdout"])
+        _, start, rest = result["stdout"].partition(f"{self.READ_FILE_START_MARKER}\n")
+        encoded, end, _ = rest.partition(f"{self.READ_FILE_END_MARKER}\n")
+        if not (start and end):
+            raise RuntimeError(
+                f"Unexpected output from `vagrant ssh` reading {file}: "
+                f"{result['stdout'][:200]!r}"
+            )
+        contents = base64.b64decode(encoded.replace("\n", ""), validate=True)
         if text:
             return contents.decode("utf-8")
         return contents
