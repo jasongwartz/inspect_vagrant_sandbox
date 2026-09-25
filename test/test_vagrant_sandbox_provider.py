@@ -790,8 +790,12 @@ class TestVagrantSandboxEnvironment:
             "stderr": "sh: 1: cannot create /root/test.txt: Permission denied",
         }
 
-        with pytest.raises(PermissionError):
+        with pytest.raises(PermissionError) as excinfo:
             await env.write_file("/root/test.txt", "test content")
+        # Inspect reports strerror and filename to the model
+        assert excinfo.value.errno == errno.EACCES
+        assert excinfo.value.strerror == "Permission denied"
+        assert excinfo.value.filename == "/root/test.txt"
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -804,8 +808,11 @@ class TestVagrantSandboxEnvironment:
             "stderr": "sh: 1: cannot create /tmp/somedir: Is a directory",
         }
 
-        with pytest.raises(IsADirectoryError):
+        with pytest.raises(IsADirectoryError) as excinfo:
             await env.write_file("/tmp/somedir", "test content")
+        assert excinfo.value.errno == errno.EISDIR
+        assert excinfo.value.strerror == "Is a directory"
+        assert excinfo.value.filename == "/tmp/somedir"
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -969,8 +976,11 @@ class TestVagrantSandboxEnvironment:
             "stderr": "stat: cannot statx '/missing/file.txt': No such file or directory",
         }
 
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(FileNotFoundError) as excinfo:
             await env.read_file("/missing/file.txt")
+        assert excinfo.value.errno == errno.ENOENT
+        assert excinfo.value.strerror == "No such file or directory"
+        assert excinfo.value.filename == "/missing/file.txt"
 
     @pytest.mark.unit
     @pytest.mark.asyncio
