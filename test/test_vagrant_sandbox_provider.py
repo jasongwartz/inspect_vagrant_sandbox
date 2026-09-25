@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from pathlib import Path
-from inspect_ai.util import OutputLimitExceededError
+from inspect_ai.util import OutputLimitExceededError, SandboxEnvironmentLimits
 from inspect_ai.util._concurrency import init_concurrency
 
 from vagrantsandbox.vagrant_sandbox_provider import (
@@ -843,7 +843,7 @@ class TestVagrantSandboxEnvironment:
         command = mock_vagrant.ssh.call_args[1]["command"]
         # Content is transferred base64-encoded (binary-safe), after a size check
         assert "base64 -- /tmp/test.txt" in command
-        assert "stat -c %s -- /tmp/test.txt" in command
+        assert "stat -L -c %s -- /tmp/test.txt" in command
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -874,6 +874,30 @@ class TestVagrantSandboxEnvironment:
 
         with pytest.raises(OutputLimitExceededError):
             await env.read_file("/tmp/huge.bin")
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_read_file_limit_follows_symlinks(
+        self, tmp_path, mock_sandbox_dir, monkeypatch
+    ):
+        """A symlink to an oversized file doesn't get around the read limit.
+
+        Runs read_file() against a stand-in for `vagrant ssh -c` that runs a
+        real shell.
+        """
+        monkeypatch.setattr(SandboxEnvironmentLimits, "MAX_READ_FILE_SIZE", 1000)
+        vagrant = Vagrant(root=str(tmp_path))
+        vagrant._make_vagrant_command = lambda args: [
+            "bash",
+            "-c",
+            args[-1],  # the command passed to `vagrant ssh --command`
+        ]
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant)
+        (tmp_path / "big.txt").write_text("x" * 1001)
+        (tmp_path / "link").symlink_to(tmp_path / "big.txt")
+
+        with pytest.raises(OutputLimitExceededError):
+            await env.read_file(str(tmp_path / "link"))
 
     @pytest.mark.unit
     @pytest.mark.asyncio
