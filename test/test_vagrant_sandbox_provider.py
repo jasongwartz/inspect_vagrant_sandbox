@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from pathlib import Path
-from inspect_ai.util import OutputLimitExceededError
+from inspect_ai.util import OutputLimitExceededError, SandboxEnvironmentLimits
 from inspect_ai.util._concurrency import init_concurrency
 
 from vagrantsandbox.vagrant_sandbox_provider import (
@@ -24,6 +24,15 @@ from vagrantsandbox.vagrant_sandbox_provider import (
 
 # exec() prints a marker to the guest's stderr before running the command.
 EXEC_PREFIX = f"echo {VagrantSandboxEnvironment.STDERR_MARKER} >&2; "
+
+
+def read_file_stdout(contents: bytes) -> str:
+    """The guest's stdout from read_file()'s command for a file with `contents`."""
+    return (
+        f"{VagrantSandboxEnvironment.READ_FILE_START_MARKER}\n"
+        f"{base64.encodebytes(contents).decode('ascii')}"
+        f"{VagrantSandboxEnvironment.READ_FILE_END_MARKER}\n"
+    )
 
 
 # Shared fixtures and test data
@@ -546,6 +555,33 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("key", ["A B", "A=B", "X;id;Y", "", "1ABC"])
+    async def test_exec_rejects_invalid_env_names(
+        self, mock_vagrant, mock_sandbox_dir, key
+    ):
+        """Env names that aren't shell variable names never reach the guest."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
+
+        with pytest.raises(ValueError, match="Invalid environment variable name"):
+            await env.exec(["true"], env={key: "value"})
+
+        mock_vagrant.ssh.assert_not_called()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_accepts_valid_env_names(self, mock_vagrant, mock_sandbox_dir):
+        """Lowercase, digits and underscores are fine in env names."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
+
+        await env.exec(["true"], env={"MY_VAR_1": "a", "_lower": "b"})
+
+        command = mock_vagrant.ssh.call_args[1]["command"]
+        assert command == EXEC_PREFIX + "export MY_VAR_1=a && export _lower=b && true"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_exec_forwards_cwd(self, mock_vagrant, mock_sandbox_dir):
         """Test that cwd is applied via cd before the command."""
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
@@ -754,8 +790,12 @@ class TestVagrantSandboxEnvironment:
             "stderr": "sh: 1: cannot create /root/test.txt: Permission denied",
         }
 
-        with pytest.raises(PermissionError):
+        with pytest.raises(PermissionError) as excinfo:
             await env.write_file("/root/test.txt", "test content")
+        # Inspect reports strerror and filename to the model
+        assert excinfo.value.errno == errno.EACCES
+        assert excinfo.value.strerror == "Permission denied"
+        assert excinfo.value.filename == "/root/test.txt"
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -768,8 +808,11 @@ class TestVagrantSandboxEnvironment:
             "stderr": "sh: 1: cannot create /tmp/somedir: Is a directory",
         }
 
-        with pytest.raises(IsADirectoryError):
+        with pytest.raises(IsADirectoryError) as excinfo:
             await env.write_file("/tmp/somedir", "test content")
+        assert excinfo.value.errno == errno.EISDIR
+        assert excinfo.value.strerror == "Is a directory"
+        assert excinfo.value.filename == "/tmp/somedir"
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -805,7 +848,7 @@ class TestVagrantSandboxEnvironment:
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
         mock_vagrant.ssh.return_value = {
             "returncode": 0,
-            "stdout": base64.b64encode(b"file content").decode("ascii"),
+            "stdout": read_file_stdout(b"file content"),
             "stderr": "",
         }
 
@@ -816,7 +859,7 @@ class TestVagrantSandboxEnvironment:
         command = mock_vagrant.ssh.call_args[1]["command"]
         # Content is transferred base64-encoded (binary-safe), after a size check
         assert "base64 -- /tmp/test.txt" in command
-        assert "stat -c %s -- /tmp/test.txt" in command
+        assert "stat -L -c %s -- /tmp/test.txt" in command
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -826,13 +869,63 @@ class TestVagrantSandboxEnvironment:
         binary_content = b"\xc3\x28"  # invalid UTF-8
         mock_vagrant.ssh.return_value = {
             "returncode": 0,
-            "stdout": base64.b64encode(binary_content).decode("ascii"),
+            "stdout": read_file_stdout(binary_content),
             "stderr": "",
         }
 
         result = await env.read_file("/tmp/test.bin", text=False)
 
         assert result == binary_content
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            base64.b64encode(b"file content").decode("ascii"),
+            read_file_stdout(b"file content").removesuffix(
+                f"{VagrantSandboxEnvironment.READ_FILE_END_MARKER}\n"
+            ),
+        ],
+        ids=["no markers", "no end marker"],
+    )
+    async def test_read_file_without_markers(
+        self, mock_vagrant, mock_sandbox_dir, stdout
+    ):
+        """Output missing read_file()'s markers raises instead of being decoded."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {
+            "returncode": 0,
+            "stdout": stdout,
+            "stderr": "",
+        }
+
+        with pytest.raises(RuntimeError, match="Unexpected output"):
+            await env.read_file("/tmp/test.txt")
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_read_file_through_real_shell(self, tmp_path, mock_sandbox_dir):
+        """read_file() against a stand-in for `vagrant ssh -c` that runs a real shell.
+
+        The stand-in prints to stdout before and after running the command, as
+        an `echo` in the guest's ~/.bashrc or a Vagrantfile trigger would.
+        """
+        vagrant = Vagrant(root=str(tmp_path))
+        vagrant._make_vagrant_command = lambda args: [
+            "sh",
+            "-c",
+            'echo "Hello vagrant"; bash -c "$1"; rc=$?; echo "Goodbye vagrant"; exit $rc',
+            "sh",
+            args[-1],  # the command passed to `vagrant ssh --command`
+        ]
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant)
+        (tmp_path / "all_bytes.bin").write_bytes(bytes(range(256)))
+        (tmp_path / "empty.bin").write_bytes(b"")
+
+        result = await env.read_file(str(tmp_path / "all_bytes.bin"), text=False)
+        assert result == bytes(range(256))
+        assert await env.read_file(str(tmp_path / "empty.bin"), text=False) == b""
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -850,6 +943,30 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_read_file_limit_follows_symlinks(
+        self, tmp_path, mock_sandbox_dir, monkeypatch
+    ):
+        """A symlink to an oversized file doesn't get around the read limit.
+
+        Runs read_file() against a stand-in for `vagrant ssh -c` that runs a
+        real shell.
+        """
+        monkeypatch.setattr(SandboxEnvironmentLimits, "MAX_READ_FILE_SIZE", 1000)
+        vagrant = Vagrant(root=str(tmp_path))
+        vagrant._make_vagrant_command = lambda args: [
+            "bash",
+            "-c",
+            args[-1],  # the command passed to `vagrant ssh --command`
+        ]
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant)
+        (tmp_path / "big.txt").write_text("x" * 1001)
+        (tmp_path / "link").symlink_to(tmp_path / "big.txt")
+
+        with pytest.raises(OutputLimitExceededError):
+            await env.read_file(str(tmp_path / "link"))
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_read_file_not_found(self, mock_vagrant, mock_sandbox_dir):
         """Test that reading a missing file raises FileNotFoundError."""
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
@@ -859,8 +976,11 @@ class TestVagrantSandboxEnvironment:
             "stderr": "stat: cannot statx '/missing/file.txt': No such file or directory",
         }
 
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(FileNotFoundError) as excinfo:
             await env.read_file("/missing/file.txt")
+        assert excinfo.value.errno == errno.ENOENT
+        assert excinfo.value.strerror == "No such file or directory"
+        assert excinfo.value.filename == "/missing/file.txt"
 
     @pytest.mark.unit
     @pytest.mark.asyncio
