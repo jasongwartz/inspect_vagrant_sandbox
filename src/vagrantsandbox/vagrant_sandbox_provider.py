@@ -937,7 +937,9 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         encoded = base64.b64encode(contents_bytes).decode("ascii")
         parent = os.path.dirname(file)
         mkdir_prefix = f"mkdir -p -- {shlex.quote(parent)} && " if parent else ""
-        command = f"{mkdir_prefix}base64 -d > {shlex.quote(file)}"
+        # Run in the C locale: _raise_file_error() matches English messages,
+        # and ssh may forward the host's LANG/LC_* to the guest.
+        command = f"export LC_ALL=C; {mkdir_prefix}base64 -d > {shlex.quote(file)}"
         result = await self.vagrant.ssh(
             vm_name=self.vm_name, command=command, input=encoded
         )
@@ -962,6 +964,7 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         size_limit = SandboxEnvironmentLimits.MAX_READ_FILE_SIZE
         limit_marker = "inspect read_file size limit exceeded"
         command = (
+            "export LC_ALL=C; "  # C locale, as in write_file()
             # -L: the size of what base64 reads, not of a symlink itself
             f"_size=$(stat -L -c %s -- {quoted_file}) && "
             f'{{ [ "$_size" -le {size_limit} ] || '
