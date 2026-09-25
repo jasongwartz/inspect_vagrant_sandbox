@@ -415,6 +415,12 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
     # trigger in the Vagrantfile) would still be included.
     STDERR_MARKER: Final = "__inspect_vagrant_stderr_8f2c41a6__"
 
+    # Printed to the guest's stdout around read_file()'s base64 output.
+    # Anything else on stdout (e.g. an `echo` in the guest's ~/.bashrc or a
+    # Vagrantfile trigger) must not be decoded into the file's contents.
+    READ_FILE_START_MARKER: Final = "__inspect_vagrant_read_file_start_8f2c41a6__"
+    READ_FILE_END_MARKER: Final = "__inspect_vagrant_read_file_end_8f2c41a6__"
+
     vagrant: Vagrant
 
     def __init__(
@@ -960,7 +966,9 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             f"_size=$(stat -L -c %s -- {quoted_file}) && "
             f'{{ [ "$_size" -le {size_limit} ] || '
             f"{{ echo {shlex.quote(limit_marker)} >&2; exit 70; }}; }} && "
-            f"base64 -- {quoted_file}"
+            f"echo {self.READ_FILE_START_MARKER} && "
+            f"base64 -- {quoted_file} && "
+            f"echo {self.READ_FILE_END_MARKER}"
         )
         result = await self.vagrant.ssh(vm_name=self.vm_name, command=command)
         if result["returncode"] != 0:
@@ -974,7 +982,14 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                 file, command, result["returncode"], result["stdout"], result["stderr"]
             )
 
-        contents = base64.b64decode(result["stdout"])
+        _, start, rest = result["stdout"].partition(f"{self.READ_FILE_START_MARKER}\n")
+        encoded, end, _ = rest.partition(f"{self.READ_FILE_END_MARKER}\n")
+        if not (start and end):
+            raise RuntimeError(
+                f"Unexpected output from `vagrant ssh` reading {file}: "
+                f"{result['stdout'][:200]!r}"
+            )
+        contents = base64.b64decode(encoded.replace("\n", ""), validate=True)
         if text:
             return contents.decode("utf-8")
         return contents

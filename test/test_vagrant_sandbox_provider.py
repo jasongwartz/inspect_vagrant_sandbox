@@ -26,6 +26,15 @@ from vagrantsandbox.vagrant_sandbox_provider import (
 EXEC_PREFIX = f"echo {VagrantSandboxEnvironment.STDERR_MARKER} >&2; "
 
 
+def read_file_stdout(contents: bytes) -> str:
+    """The guest's stdout from read_file()'s command for a file with `contents`."""
+    return (
+        f"{VagrantSandboxEnvironment.READ_FILE_START_MARKER}\n"
+        f"{base64.encodebytes(contents).decode('ascii')}"
+        f"{VagrantSandboxEnvironment.READ_FILE_END_MARKER}\n"
+    )
+
+
 # Shared fixtures and test data
 @pytest.fixture
 def mock_vagrant():
@@ -832,7 +841,7 @@ class TestVagrantSandboxEnvironment:
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
         mock_vagrant.ssh.return_value = {
             "returncode": 0,
-            "stdout": base64.b64encode(b"file content").decode("ascii"),
+            "stdout": read_file_stdout(b"file content"),
             "stderr": "",
         }
 
@@ -853,13 +862,63 @@ class TestVagrantSandboxEnvironment:
         binary_content = b"\xc3\x28"  # invalid UTF-8
         mock_vagrant.ssh.return_value = {
             "returncode": 0,
-            "stdout": base64.b64encode(binary_content).decode("ascii"),
+            "stdout": read_file_stdout(binary_content),
             "stderr": "",
         }
 
         result = await env.read_file("/tmp/test.bin", text=False)
 
         assert result == binary_content
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            base64.b64encode(b"file content").decode("ascii"),
+            read_file_stdout(b"file content").removesuffix(
+                f"{VagrantSandboxEnvironment.READ_FILE_END_MARKER}\n"
+            ),
+        ],
+        ids=["no markers", "no end marker"],
+    )
+    async def test_read_file_without_markers(
+        self, mock_vagrant, mock_sandbox_dir, stdout
+    ):
+        """Output missing read_file()'s markers raises instead of being decoded."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {
+            "returncode": 0,
+            "stdout": stdout,
+            "stderr": "",
+        }
+
+        with pytest.raises(RuntimeError, match="Unexpected output"):
+            await env.read_file("/tmp/test.txt")
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_read_file_through_real_shell(self, tmp_path, mock_sandbox_dir):
+        """read_file() against a stand-in for `vagrant ssh -c` that runs a real shell.
+
+        The stand-in prints to stdout before and after running the command, as
+        an `echo` in the guest's ~/.bashrc or a Vagrantfile trigger would.
+        """
+        vagrant = Vagrant(root=str(tmp_path))
+        vagrant._make_vagrant_command = lambda args: [
+            "sh",
+            "-c",
+            'echo "Hello vagrant"; bash -c "$1"; rc=$?; echo "Goodbye vagrant"; exit $rc',
+            "sh",
+            args[-1],  # the command passed to `vagrant ssh --command`
+        ]
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant)
+        (tmp_path / "all_bytes.bin").write_bytes(bytes(range(256)))
+        (tmp_path / "empty.bin").write_bytes(b"")
+
+        result = await env.read_file(str(tmp_path / "all_bytes.bin"), text=False)
+        assert result == bytes(range(256))
+        assert await env.read_file(str(tmp_path / "empty.bin"), text=False) == b""
 
     @pytest.mark.unit
     @pytest.mark.asyncio
