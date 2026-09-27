@@ -407,7 +407,8 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
 
     TRACE_NAME = "vagrant_sandbox_environment"
 
-    # Printed to the guest's stderr just before exec() runs the command.
+    # Printed to the guest's stderr just before exec(), read_file() and
+    # write_file() run their command.
     # `vagrant ssh` prints its own warnings (e.g. fog's under libvirt, while
     # it looks up the VM) before it starts ssh, and ssh then writes to the
     # same stderr, so only what follows the marker is the command's stderr.
@@ -849,16 +850,11 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                 timeout=timeout,
             )
 
-            # No marker means ssh failed before the command ran: keep all of
-            # stderr so the failure stays debuggable.
-            _, marker, guest_stderr = result["stderr"].partition(
-                f"{self.STDERR_MARKER}\n"
-            )
             exec_result = ExecResult(
                 success=result["returncode"] == 0,
                 returncode=result["returncode"],
                 stdout=result["stdout"],
-                stderr=guest_stderr if marker else result["stderr"],
+                stderr=self._guest_stderr(result["stderr"]),
             )
             # Raise only if the shell could not execute cmd[0] itself (bash:
             # "bash: line 1: /etc/passwd: Permission denied", dash under
@@ -875,6 +871,13 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                 raise PermissionError(errno.EACCES, "Permission denied", cmd[0])
             self._verify_exec_output_size(exec_result)
             return exec_result
+
+    def _guest_stderr(self, stderr: str) -> str:
+        """Drop what vagrant printed to stderr before STDERR_MARKER."""
+        # No marker means ssh failed before the command ran: keep all of
+        # stderr so the failure stays debuggable.
+        _, marker, guest_stderr = stderr.partition(f"{self.STDERR_MARKER}\n")
+        return guest_stderr if marker else stderr
 
     # _verify_exec_output_size() and _truncate_middle() are a port of
     # inspect_ai 0.3.123's private verify_exec_result_size() and
@@ -938,13 +941,23 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         encoded = base64.b64encode(contents_bytes).decode("ascii")
         parent = os.path.dirname(file)
         mkdir_prefix = f"mkdir -p -- {shlex.quote(parent)} && " if parent else ""
-        command = f"{mkdir_prefix}base64 -d > {shlex.quote(file)}"
+        # Run in the C locale: _raise_file_error() matches English messages,
+        # and ssh may forward the host's LANG/LC_* to the guest.
+        command = f"export LC_ALL=C; {mkdir_prefix}base64 -d > {shlex.quote(file)}"
         result = await self.vagrant.ssh(
-            vm_name=self.vm_name, command=command, input=encoded
+            vm_name=self.vm_name,
+            command=f"echo {self.STDERR_MARKER} >&2; {command}",
+            input=encoded,
         )
         if result["returncode"] != 0:
+            if f"{self.STDERR_MARKER}\n" not in result["stderr"]:
+                # No marker: ssh failed before the command ran, not a file error
+                raise subprocess.CalledProcessError(
+                    result["returncode"], command, result["stdout"], result["stderr"]
+                )
+            stderr = self._guest_stderr(result["stderr"])
             self._raise_file_error(
-                file, command, result["returncode"], result["stdout"], result["stderr"]
+                file, command, result["returncode"], result["stdout"], stderr
             )
 
     @overload
@@ -963,6 +976,7 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         size_limit = SandboxEnvironmentLimits.MAX_READ_FILE_SIZE
         limit_marker = "inspect read_file size limit exceeded"
         command = (
+            "export LC_ALL=C; "  # C locale, as in write_file()
             # -L: the size of what base64 reads, not of a symlink itself
             f"_size=$(stat -L -c %s -- {quoted_file}) && "
             f'{{ [ "$_size" -le {size_limit} ] || '
@@ -971,7 +985,9 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             f"base64 -- {quoted_file} && "
             f"echo {self.READ_FILE_END_MARKER}"
         )
-        result = await self.vagrant.ssh(vm_name=self.vm_name, command=command)
+        result = await self.vagrant.ssh(
+            vm_name=self.vm_name, command=f"echo {self.STDERR_MARKER} >&2; {command}"
+        )
         if result["returncode"] != 0:
             if limit_marker in result["stderr"]:
                 raise OutputLimitExceededError(
@@ -979,8 +995,14 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                     # The potentially large content is not transferred.
                     truncated_output=None,
                 )
+            if f"{self.STDERR_MARKER}\n" not in result["stderr"]:
+                # No marker: ssh failed before the command ran, not a file error
+                raise subprocess.CalledProcessError(
+                    result["returncode"], command, result["stdout"], result["stderr"]
+                )
+            stderr = self._guest_stderr(result["stderr"])
             self._raise_file_error(
-                file, command, result["returncode"], result["stdout"], result["stderr"]
+                file, command, result["returncode"], result["stdout"], stderr
             )
 
         _, start, rest = result["stdout"].partition(f"{self.READ_FILE_START_MARKER}\n")

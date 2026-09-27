@@ -3,6 +3,7 @@ import base64
 import errno
 import os
 import subprocess
+import sys
 from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
@@ -787,7 +788,8 @@ class TestVagrantSandboxEnvironment:
         mock_vagrant.ssh.return_value = {
             "returncode": 1,
             "stdout": "",
-            "stderr": "sh: 1: cannot create /root/test.txt: Permission denied",
+            "stderr": f"{VagrantSandboxEnvironment.STDERR_MARKER}\n"
+            "sh: 1: cannot create /root/test.txt: Permission denied",
         }
 
         with pytest.raises(PermissionError) as excinfo:
@@ -805,7 +807,8 @@ class TestVagrantSandboxEnvironment:
         mock_vagrant.ssh.return_value = {
             "returncode": 1,
             "stdout": "",
-            "stderr": "sh: 1: cannot create /tmp/somedir: Is a directory",
+            "stderr": f"{VagrantSandboxEnvironment.STDERR_MARKER}\n"
+            "sh: 1: cannot create /tmp/somedir: Is a directory",
         }
 
         with pytest.raises(IsADirectoryError) as excinfo:
@@ -822,7 +825,8 @@ class TestVagrantSandboxEnvironment:
         mock_vagrant.ssh.return_value = {
             "returncode": 1,
             "stdout": "",
-            "stderr": "something inexplicable went wrong",
+            "stderr": f"{VagrantSandboxEnvironment.STDERR_MARKER}\n"
+            "something inexplicable went wrong",
         }
 
         with pytest.raises(subprocess.CalledProcessError):
@@ -840,6 +844,65 @@ class TestVagrantSandboxEnvironment:
         mock_vagrant.ssh.assert_called_once()
         call_args = mock_vagrant.ssh.call_args
         assert call_args[1]["input"] == base64.b64encode(b"\xc3\x28").decode("ascii")
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(sys.platform != "linux", reason="read_file() runs GNU stat")
+    async def test_file_ops_ignore_vagrant_warnings(self, tmp_path, mock_sandbox_dir):
+        """Errors are mapped from the command's stderr, not from vagrant's own
+        warnings, even when a warning looks like a file error."""
+        vagrant = Vagrant(root=str(tmp_path))
+        vagrant._make_vagrant_command = lambda args: [
+            "sh",
+            "-c",
+            'echo "[fog][WARNING] /etc/foo: No such file or directory" >&2; '
+            'bash -c "$1"',
+            "sh",
+            args[-1],  # the command passed to `vagrant ssh --command`
+        ]
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant)
+
+        with pytest.raises(IsADirectoryError):
+            await env.read_file(str(tmp_path))
+        with pytest.raises(IsADirectoryError):
+            await env.write_file(str(tmp_path), "content")
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "ssh_error",
+        [
+            "vagrant@192.168.121.5: Permission denied (publickey).",
+            "Warning: Identity file /home/me/.vagrant.d/insecure_private_key "
+            "not accessible: No such file or directory.",
+        ],
+        ids=["permission denied", "no such file"],
+    )
+    async def test_file_ops_report_ssh_failure(
+        self, tmp_path, mock_sandbox_dir, ssh_error
+    ):
+        """If ssh fails before the command runs, file operations raise
+        CalledProcessError with ssh's message, not an error about the file."""
+        vagrant = Vagrant(root=str(tmp_path))
+        # A stand-in for `vagrant ssh` that fails without running the command
+        vagrant._make_vagrant_command = lambda args: [
+            "sh",
+            "-c",
+            'echo "$1" >&2; exit 255',
+            "sh",
+            ssh_error,
+        ]
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant)
+        file = str(tmp_path / "file.txt")
+
+        with pytest.raises(subprocess.CalledProcessError) as excinfo:
+            await env.read_file(file)
+        assert excinfo.value.returncode == 255
+        assert ssh_error in excinfo.value.stderr
+        with pytest.raises(subprocess.CalledProcessError) as excinfo:
+            await env.write_file(file, "content")
+        assert excinfo.value.returncode == 255
+        assert ssh_error in excinfo.value.stderr
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -973,7 +1036,8 @@ class TestVagrantSandboxEnvironment:
         mock_vagrant.ssh.return_value = {
             "returncode": 1,
             "stdout": "",
-            "stderr": "stat: cannot statx '/missing/file.txt': No such file or directory",
+            "stderr": f"{VagrantSandboxEnvironment.STDERR_MARKER}\n"
+            "stat: cannot statx '/missing/file.txt': No such file or directory",
         }
 
         with pytest.raises(FileNotFoundError) as excinfo:
@@ -990,11 +1054,49 @@ class TestVagrantSandboxEnvironment:
         mock_vagrant.ssh.return_value = {
             "returncode": 1,
             "stdout": "",
-            "stderr": "something inexplicable went wrong",
+            "stderr": f"{VagrantSandboxEnvironment.STDERR_MARKER}\n"
+            "something inexplicable went wrong",
         }
 
         with pytest.raises(subprocess.CalledProcessError):
             await env.read_file("/missing/file.txt")
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_file_ops_run_in_c_locale(self, tmp_path, mock_sandbox_dir):
+        """Errors are mapped from English messages, so file operations must run
+        in the C locale even when ssh forwards a German one from the host."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        # Stand-ins for stat and base64 that fail like localized ones would
+        for tool in ("stat", "base64"):
+            fake = bin_dir / tool
+            fake.write_text(
+                "#!/bin/sh\n"
+                'if [ "$LC_ALL" = C ]; then msg="No such file or directory"\n'
+                'else msg="Datei oder Verzeichnis nicht gefunden"; fi\n'
+                f'echo "{tool}: $msg" >&2\n'
+                "exit 1\n"
+            )
+            fake.chmod(0o755)
+        vagrant = Vagrant(
+            root=str(tmp_path),
+            env={
+                **os.environ,
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                "LANG": "de_DE.UTF-8",
+                "LC_ALL": "de_DE.UTF-8",
+            },
+        )
+        # Run the command passed to `vagrant ssh --command` in a real shell
+        vagrant._make_vagrant_command = lambda args: ["bash", "-c", args[-1]]
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant)
+        file = str(tmp_path / "file.txt")
+
+        with pytest.raises(FileNotFoundError):
+            await env.read_file(file)  # fails in stat
+        with pytest.raises(FileNotFoundError):
+            await env.write_file(file, "content")  # fails in base64
 
     @pytest.mark.unit
     @pytest.mark.asyncio
