@@ -949,6 +949,11 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             input=encoded,
         )
         if result["returncode"] != 0:
+            if f"{self.STDERR_MARKER}\n" not in result["stderr"]:
+                # No marker: ssh failed before the command ran, not a file error
+                raise subprocess.CalledProcessError(
+                    result["returncode"], command, result["stdout"], result["stderr"]
+                )
             stderr = self._guest_stderr(result["stderr"])
             self._raise_file_error(
                 file, command, result["returncode"], result["stdout"], stderr
@@ -988,6 +993,11 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                     limit_str=SandboxEnvironmentLimits.MAX_READ_FILE_SIZE_STR,
                     # The potentially large content is not transferred.
                     truncated_output=None,
+                )
+            if f"{self.STDERR_MARKER}\n" not in result["stderr"]:
+                # No marker: ssh failed before the command ran, not a file error
+                raise subprocess.CalledProcessError(
+                    result["returncode"], command, result["stdout"], result["stderr"]
                 )
             stderr = self._guest_stderr(result["stderr"])
             self._raise_file_error(

@@ -788,7 +788,8 @@ class TestVagrantSandboxEnvironment:
         mock_vagrant.ssh.return_value = {
             "returncode": 1,
             "stdout": "",
-            "stderr": "sh: 1: cannot create /root/test.txt: Permission denied",
+            "stderr": f"{VagrantSandboxEnvironment.STDERR_MARKER}\n"
+            "sh: 1: cannot create /root/test.txt: Permission denied",
         }
 
         with pytest.raises(PermissionError) as excinfo:
@@ -806,7 +807,8 @@ class TestVagrantSandboxEnvironment:
         mock_vagrant.ssh.return_value = {
             "returncode": 1,
             "stdout": "",
-            "stderr": "sh: 1: cannot create /tmp/somedir: Is a directory",
+            "stderr": f"{VagrantSandboxEnvironment.STDERR_MARKER}\n"
+            "sh: 1: cannot create /tmp/somedir: Is a directory",
         }
 
         with pytest.raises(IsADirectoryError) as excinfo:
@@ -823,7 +825,8 @@ class TestVagrantSandboxEnvironment:
         mock_vagrant.ssh.return_value = {
             "returncode": 1,
             "stdout": "",
-            "stderr": "something inexplicable went wrong",
+            "stderr": f"{VagrantSandboxEnvironment.STDERR_MARKER}\n"
+            "something inexplicable went wrong",
         }
 
         with pytest.raises(subprocess.CalledProcessError):
@@ -863,6 +866,43 @@ class TestVagrantSandboxEnvironment:
             await env.read_file(str(tmp_path))
         with pytest.raises(IsADirectoryError):
             await env.write_file(str(tmp_path), "content")
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "ssh_error",
+        [
+            "vagrant@192.168.121.5: Permission denied (publickey).",
+            "Warning: Identity file /home/me/.vagrant.d/insecure_private_key "
+            "not accessible: No such file or directory.",
+        ],
+        ids=["permission denied", "no such file"],
+    )
+    async def test_file_ops_report_ssh_failure(
+        self, tmp_path, mock_sandbox_dir, ssh_error
+    ):
+        """If ssh fails before the command runs, file operations raise
+        CalledProcessError with ssh's message, not an error about the file."""
+        vagrant = Vagrant(root=str(tmp_path))
+        # A stand-in for `vagrant ssh` that fails without running the command
+        vagrant._make_vagrant_command = lambda args: [
+            "sh",
+            "-c",
+            'echo "$1" >&2; exit 255',
+            "sh",
+            ssh_error,
+        ]
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant)
+        file = str(tmp_path / "file.txt")
+
+        with pytest.raises(subprocess.CalledProcessError) as excinfo:
+            await env.read_file(file)
+        assert excinfo.value.returncode == 255
+        assert ssh_error in excinfo.value.stderr
+        with pytest.raises(subprocess.CalledProcessError) as excinfo:
+            await env.write_file(file, "content")
+        assert excinfo.value.returncode == 255
+        assert ssh_error in excinfo.value.stderr
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -996,7 +1036,8 @@ class TestVagrantSandboxEnvironment:
         mock_vagrant.ssh.return_value = {
             "returncode": 1,
             "stdout": "",
-            "stderr": "stat: cannot statx '/missing/file.txt': No such file or directory",
+            "stderr": f"{VagrantSandboxEnvironment.STDERR_MARKER}\n"
+            "stat: cannot statx '/missing/file.txt': No such file or directory",
         }
 
         with pytest.raises(FileNotFoundError) as excinfo:
@@ -1013,7 +1054,8 @@ class TestVagrantSandboxEnvironment:
         mock_vagrant.ssh.return_value = {
             "returncode": 1,
             "stdout": "",
-            "stderr": "something inexplicable went wrong",
+            "stderr": f"{VagrantSandboxEnvironment.STDERR_MARKER}\n"
+            "something inexplicable went wrong",
         }
 
         with pytest.raises(subprocess.CalledProcessError):
