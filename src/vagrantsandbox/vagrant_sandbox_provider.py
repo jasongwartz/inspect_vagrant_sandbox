@@ -6,6 +6,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import time
 import uuid
 from dataclasses import dataclass
 from logging import getLogger
@@ -421,6 +422,11 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
     READ_FILE_START_MARKER: Final = "__inspect_vagrant_read_file_start_8f2c41a6__"
     READ_FILE_END_MARKER: Final = "__inspect_vagrant_read_file_end_8f2c41a6__"
 
+    # Runs exec()'s command in the guest when it has a timeout. By absolute
+    # path: it runs as `user`, so it must not be looked up through a PATH that
+    # a less privileged user can write to.
+    TIMEOUT_COMMAND: Final = "/usr/bin/timeout"
+
     vagrant: Vagrant
 
     def __init__(
@@ -814,6 +820,19 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         timeout_retry: bool = True,
     ) -> ExecResult[str]:
         command = shlex.join(cmd)
+        if timeout is not None:
+            # `timeout 0s` would mean no timeout at all
+            if timeout <= 0:
+                raise ValueError(f"timeout must be positive, got {timeout}")
+            # On a timeout the host kills `vagrant ssh`, but sshd doesn't signal
+            # a --no-tty command when its connection drops, so the command would
+            # keep running in the guest. GNU timeout signals its whole process
+            # group, so the command's children die too, and SIGKILLs it 5s
+            # later if it ignores SIGTERM. Wrapped before the env/cwd/user
+            # handling below, it runs as `user`.
+            command = shlex.join(
+                [self.TIMEOUT_COMMAND, "-k", "5s", f"{timeout}s", *cmd]
+            )
         if env:
             # Keys go into the shell unquoted: `export A B=v` would export B,
             # and `export X;id;Y=v` would run `id`
@@ -841,12 +860,18 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             # f"exec_command {self.vm_id=} {exec_response_pid=}",
             "exec_command ",
         ):
+            start = time.monotonic()
             result = await self.vagrant.ssh(
                 vm_name=self.vm_name,
                 command=f"echo {self.STDERR_MARKER} >&2; {command}",
                 input=input,
-                timeout=timeout,
+                # Only a fallback for a hung vagrant or ssh: the guest's timeout
+                # returns within timeout + 5s of the command starting, and
+                # vagrant takes several seconds (more under load) to load the
+                # Vagrantfile, look up the VM and connect before it starts.
+                timeout=None if timeout is None else timeout + 30,
             )
+            elapsed = time.monotonic() - start
 
             exec_result = ExecResult(
                 success=result["returncode"] == 0,
@@ -854,16 +879,32 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                 stdout=result["stdout"],
                 stderr=self._guest_stderr(result["stderr"]),
             )
+            # The guest's timeout fired: GNU timeout exits 124 when SIGTERM
+            # stopped the command and 137 when it had to SIGKILL it, BusyBox's
+            # exits 143. A command killed by those signals for another reason
+            # (e.g. the OOM killer, or `kill $$`) exits 137 or 143 too, so those
+            # only count once the timeout has passed.
+            if timeout is not None and exec_result.returncode in (124, 137, 143):
+                if exec_result.returncode == 124 or elapsed >= timeout:
+                    raise TimeoutError(f"Command timed out after {timeout} seconds")
             # Raise only if the shell could not execute cmd[0] itself (bash:
             # "bash: line 1: /etc/passwd: Permission denied", dash under
             # `user`: "sh: 1: /etc/passwd: Permission denied"). The same error
             # from inside the command, e.g. `bash -c ./script.sh`, is the
-            # command's own result.
+            # command's own result. With a timeout, GNU timeout is what can't
+            # execute cmd[0]: "/usr/bin/timeout: failed to run command
+            # '/etc/passwd': Permission denied" (‘/etc/passwd’ in UTF-8 locales).
             if (
                 exec_result.returncode == 126
                 and cmd
                 and exec_result.stderr.rstrip().endswith(
                     f": {cmd[0]}: Permission denied"
+                    if timeout is None
+                    else tuple(
+                        f"{self.TIMEOUT_COMMAND}: failed to run command "
+                        f"{quoted}: Permission denied"
+                        for quoted in (f"'{cmd[0]}'", f"‘{cmd[0]}’")
+                    )
                 )
             ):
                 raise PermissionError(errno.EACCES, "Permission denied", cmd[0])
