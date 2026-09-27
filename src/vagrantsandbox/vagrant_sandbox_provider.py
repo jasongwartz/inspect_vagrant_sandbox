@@ -1,4 +1,7 @@
 import asyncio
+import base64
+import errno
+import math
 import os
 import re
 import shlex
@@ -13,6 +16,7 @@ from typing import (
     Any,
     Callable,
     Coroutine,
+    Final,
     Literal,
     NotRequired,
     TypedDict,
@@ -36,7 +40,6 @@ from inspect_ai.util import (
     sandboxenv,
     trace_action,
 )
-from inspect_ai.util._subprocess import default_max_subprocesses
 from platformdirs import user_cache_dir
 from pydantic import BaseModel, Field, field_validator
 from vagrant import Status, Vagrant as BaseVagrant
@@ -469,6 +472,21 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
 
     TRACE_NAME = "vagrant_sandbox_environment"
 
+    # Printed to the guest's stderr just before exec(), read_file() and
+    # write_file() run their command.
+    # `vagrant ssh` prints its own warnings (e.g. fog's under libvirt, while
+    # it looks up the VM) before it starts ssh, and ssh then writes to the
+    # same stderr, so only what follows the marker is the command's stderr.
+    # Anything vagrant prints after ssh exits (e.g. a user-defined `after`
+    # trigger in the Vagrantfile) would still be included.
+    STDERR_MARKER: Final = "__inspect_vagrant_stderr_8f2c41a6__"
+
+    # Printed to the guest's stdout around read_file()'s base64 output.
+    # Anything else on stdout (e.g. an `echo` in the guest's ~/.bashrc or a
+    # Vagrantfile trigger) must not be decoded into the file's contents.
+    READ_FILE_START_MARKER: Final = "__inspect_vagrant_read_file_start_8f2c41a6__"
+    READ_FILE_END_MARKER: Final = "__inspect_vagrant_read_file_end_8f2c41a6__"
+
     vagrant: Vagrant
 
     def __init__(
@@ -485,10 +503,10 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
     def default_concurrency(cls) -> int | None:
         """Default concurrent sandbox limit for vagrant environments.
 
-        VMs are resource-intensive, so limit to cpu_count().
+        VMs are resource-intensive, so limit to process_cpu_count().
         Can be overridden via --max-sandboxes flag.
         """
-        return default_max_subprocesses()
+        return os.process_cpu_count() or 1
 
     @classmethod
     async def task_init(
@@ -862,6 +880,27 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         timeout_retry: bool = True,
     ) -> ExecResult[str]:
         command = shlex.join(cmd)
+        if env:
+            # Keys go into the shell unquoted: `export A B=v` would export B,
+            # and `export X;id;Y=v` would run `id`
+            for key in env:
+                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+                    raise ValueError(f"Invalid environment variable name: {key!r}")
+            # `&&`, not `;`: a failing `cd` below must abort the command rather
+            # than let it run in the wrong directory
+            exports = " ".join(
+                f"export {key}={shlex.quote(value)} &&" for key, value in env.items()
+            )
+            command = f"{exports} {command}"
+        if cwd is not None:
+            command = f"cd {shlex.quote(cwd)} && {command}"
+        if user is not None:
+            # Vagrant's base box guidelines require passwordless sudo for the
+            # SSH user, and mainstream boxes comply. Wrap the command in `sh -c`
+            # so the cwd/env handling above also runs as the target user. `-n`
+            # makes a non-compliant box fail fast ("sudo: a password is
+            # required" on stderr) instead of hanging on a password prompt.
+            command = f"sudo -H -n -u {shlex.quote(user)} sh -c {shlex.quote(command)}"
         with trace_action(
             self.logger,
             self.TRACE_NAME,
@@ -870,39 +909,94 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         ):
             result = await self.vagrant.ssh(
                 vm_name=self.vm_name,
-                command=command,
+                command=f"echo {self.STDERR_MARKER} >&2; {command}",
                 input=input,
                 timeout=timeout,
                 output_limit=SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE,
             )
             if result.get("truncated"):
+                # Checked first: the PermissionError check below can't trust a
+                # cut-off stderr
                 raise OutputLimitExceededError(
                     limit_str=SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE_STR,
-                    truncated_output=f"{result['stdout']}{result['stderr']}",
+                    truncated_output=(
+                        f"{result['stdout']}{self._guest_stderr(result['stderr'])}"
+                    ),
                 )
 
-            return ExecResult(
+            exec_result = ExecResult(
                 success=result["returncode"] == 0,
                 returncode=result["returncode"],
                 stdout=result["stdout"],
-                stderr=result["stderr"],
+                stderr=self._guest_stderr(result["stderr"]),
             )
+            # Raise only if the shell could not execute cmd[0] itself (bash:
+            # "bash: line 1: /etc/passwd: Permission denied", dash under
+            # `user`: "sh: 1: /etc/passwd: Permission denied"). The same error
+            # from inside the command, e.g. `bash -c ./script.sh`, is the
+            # command's own result.
+            if (
+                exec_result.returncode == 126
+                and cmd
+                and exec_result.stderr.rstrip().endswith(
+                    f": {cmd[0]}: Permission denied"
+                )
+            ):
+                raise PermissionError(errno.EACCES, "Permission denied", cmd[0])
+            return exec_result
+
+    def _guest_stderr(self, stderr: str) -> str:
+        """Drop what vagrant printed to stderr before STDERR_MARKER."""
+        # No marker means ssh failed before the command ran: keep all of
+        # stderr so the failure stays debuggable.
+        _, marker, guest_stderr = stderr.partition(f"{self.STDERR_MARKER}\n")
+        return guest_stderr if marker else stderr
+
+    @staticmethod
+    def _raise_file_error(
+        file: str, command: str, returncode: int, stdout: str, stderr: str
+    ) -> None:
+        """Map a failed file operation to the errno-style exceptions Inspect expects."""
+        if "No such file or directory" in stderr:
+            raise FileNotFoundError(errno.ENOENT, "No such file or directory", file)
+        if "Is a directory" in stderr:
+            raise IsADirectoryError(errno.EISDIR, "Is a directory", file)
+        if "Permission denied" in stderr:
+            raise PermissionError(errno.EACCES, "Permission denied", file)
+        raise subprocess.CalledProcessError(returncode, command, stdout, stderr)
 
     @override
     async def write_file(self, file: str, contents: str | bytes) -> None:
-        contents_str: str
+        contents_bytes: bytes
         if isinstance(contents, bytes):
-            contents_str = contents.decode()
+            contents_bytes = contents
         elif isinstance(contents, str):
-            contents_str = contents
+            contents_bytes = contents.encode("utf-8")
         else:
             assert_never(contents)
 
-        command = f"printf %s {shlex.quote(contents_str)} > {shlex.quote(file)}"
-        result = await self.vagrant.ssh(vm_name=self.vm_name, command=command)
+        # Transfer the content base64-encoded via stdin: this is binary-safe
+        # and avoids shell command-length limits for large files.
+        encoded = base64.b64encode(contents_bytes).decode("ascii")
+        parent = os.path.dirname(file)
+        mkdir_prefix = f"mkdir -p -- {shlex.quote(parent)} && " if parent else ""
+        # Run in the C locale: _raise_file_error() matches English messages,
+        # and ssh may forward the host's LANG/LC_* to the guest.
+        command = f"export LC_ALL=C; {mkdir_prefix}base64 -d > {shlex.quote(file)}"
+        result = await self.vagrant.ssh(
+            vm_name=self.vm_name,
+            command=f"echo {self.STDERR_MARKER} >&2; {command}",
+            input=encoded,
+        )
         if result["returncode"] != 0:
-            raise subprocess.CalledProcessError(
-                result["returncode"], command, result["stdout"]
+            if f"{self.STDERR_MARKER}\n" not in result["stderr"]:
+                # No marker: ssh failed before the command ran, not a file error
+                raise subprocess.CalledProcessError(
+                    result["returncode"], command, result["stdout"], result["stderr"]
+                )
+            stderr = self._guest_stderr(result["stderr"])
+            self._raise_file_error(
+                file, command, result["returncode"], result["stdout"], stderr
             )
 
     @overload
@@ -913,11 +1007,34 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
 
     @override
     async def read_file(self, file: str, text: bool = True) -> str | bytes:
-        command = f"cat {file}"
+        quoted_file = shlex.quote(file)
+        # Check the file's size against Inspect's read limit before transferring
+        # it, then transfer base64-encoded so binary content survives the ssh
+        # round-trip. A single remote command keeps this to one (slow) vagrant
+        # ssh invocation.
+        size_limit = SandboxEnvironmentLimits.MAX_READ_FILE_SIZE
+        limit_marker = "inspect read_file size limit exceeded"
+        command = (
+            "export LC_ALL=C; "  # C locale, as in write_file()
+            # -L: the size of what base64 reads, not of a symlink itself
+            f"_size=$(stat -L -c %s -- {quoted_file}) && "
+            f'{{ [ "$_size" -le {size_limit} ] || '
+            f"{{ echo {shlex.quote(limit_marker)} >&2; exit 70; }}; }} && "
+            f"echo {self.READ_FILE_START_MARKER} && "
+            f"base64 -- {quoted_file} && "
+            f"echo {self.READ_FILE_END_MARKER}"
+        )
+        # Stop reading once the output is more than a file within the limit
+        # can produce, so that a file that never ends but that `stat` sizes as
+        # 0 (/dev/zero) can't fill host memory. That is the file's base64 (4
+        # bytes per 3, and a newline after each 76-character line), plus 4 KiB
+        # for the two marker lines and anything the guest's login shell prints.
+        base64_size = 4 * math.ceil(size_limit / 3)
+        output_limit = base64_size + math.ceil(base64_size / 76) + 4096
         result = await self.vagrant.ssh(
             vm_name=self.vm_name,
-            command=command,
-            output_limit=SandboxEnvironmentLimits.MAX_READ_FILE_SIZE,
+            command=f"echo {self.STDERR_MARKER} >&2; {command}",
+            output_limit=output_limit,
         )
         if result.get("truncated"):
             raise OutputLimitExceededError(
@@ -925,13 +1042,33 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                 truncated_output=None,
             )
         if result["returncode"] != 0:
-            raise subprocess.CalledProcessError(
-                result["returncode"], command, result["stdout"]
+            if limit_marker in result["stderr"]:
+                raise OutputLimitExceededError(
+                    limit_str=SandboxEnvironmentLimits.MAX_READ_FILE_SIZE_STR,
+                    # The potentially large content is not transferred.
+                    truncated_output=None,
+                )
+            if f"{self.STDERR_MARKER}\n" not in result["stderr"]:
+                # No marker: ssh failed before the command ran, not a file error
+                raise subprocess.CalledProcessError(
+                    result["returncode"], command, result["stdout"], result["stderr"]
+                )
+            stderr = self._guest_stderr(result["stderr"])
+            self._raise_file_error(
+                file, command, result["returncode"], result["stdout"], stderr
             )
 
+        _, start, rest = result["stdout"].partition(f"{self.READ_FILE_START_MARKER}\n")
+        encoded, end, _ = rest.partition(f"{self.READ_FILE_END_MARKER}\n")
+        if not (start and end):
+            raise RuntimeError(
+                f"Unexpected output from `vagrant ssh` reading {file}: "
+                f"{result['stdout'][:200]!r}"
+            )
+        contents = base64.b64decode(encoded.replace("\n", ""), validate=True)
         if text:
-            return result["stdout"]
-        return result["stdout"].encode("utf-8")
+            return contents.decode("utf-8")
+        return contents
 
     @override
     async def connection(self, *, user: str | None = None) -> SandboxConnection:
