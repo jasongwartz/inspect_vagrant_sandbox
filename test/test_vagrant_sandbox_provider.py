@@ -3,6 +3,7 @@ import base64
 import errno
 import os
 import subprocess
+import sys
 from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
@@ -840,6 +841,28 @@ class TestVagrantSandboxEnvironment:
         mock_vagrant.ssh.assert_called_once()
         call_args = mock_vagrant.ssh.call_args
         assert call_args[1]["input"] == base64.b64encode(b"\xc3\x28").decode("ascii")
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(sys.platform != "linux", reason="read_file() runs GNU stat")
+    async def test_file_ops_ignore_vagrant_warnings(self, tmp_path, mock_sandbox_dir):
+        """Errors are mapped from the command's stderr, not from vagrant's own
+        warnings, even when a warning looks like a file error."""
+        vagrant = Vagrant(root=str(tmp_path))
+        vagrant._make_vagrant_command = lambda args: [
+            "sh",
+            "-c",
+            'echo "[fog][WARNING] /etc/foo: No such file or directory" >&2; '
+            'bash -c "$1"',
+            "sh",
+            args[-1],  # the command passed to `vagrant ssh --command`
+        ]
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant)
+
+        with pytest.raises(IsADirectoryError):
+            await env.read_file(str(tmp_path))
+        with pytest.raises(IsADirectoryError):
+            await env.write_file(str(tmp_path), "content")
 
     @pytest.mark.unit
     @pytest.mark.asyncio
