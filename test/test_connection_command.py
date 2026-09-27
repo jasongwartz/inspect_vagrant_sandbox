@@ -226,7 +226,10 @@ async def test_connection_command_multi_vm():
         connection = await unnamed.connection()
         result = run_connection_command(connection.command, "cat /tmp/conn_marker\n")
         assert result.returncode == 0, result.stderr
-        assert default.vm_name in output_lines(result)
+        # The marker holds the sandbox's key, which is the base VM name
+        # ("attacker"), not vm_name, which carries the per-sample suffix.
+        default_name = next(name for name, s in named.items() if s is default)
+        assert default_name in output_lines(result)
 
     finally:
         await VagrantSandboxEnvironment.sample_cleanup(
