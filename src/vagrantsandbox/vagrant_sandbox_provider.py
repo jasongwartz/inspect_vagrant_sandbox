@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import errno
 import json
 import os
 import re
@@ -14,6 +16,7 @@ from typing import (
     Any,
     Callable,
     Coroutine,
+    Final,
     Literal,
     TypedDict,
     TypeVar,
@@ -27,9 +30,11 @@ from typing import AsyncContextManager
 
 from inspect_ai.util import (
     ExecResult,
+    OutputLimitExceededError,
     SandboxConnection,
     SandboxEnvironment,
     SandboxEnvironmentConfigType,
+    SandboxEnvironmentLimits,
     concurrency,
     sandboxenv,
     trace_action,
@@ -253,7 +258,7 @@ class ExecCommandReturn(TypedDict):
 class Vagrant(BaseVagrant):
     logger = getLogger(__name__)
 
-    async def get_vm_names(self) -> list[str | None]:
+    async def get_vm_names(self) -> list[str]:
         """Get list of VM names defined in the Vagrantfile.
 
         python-vagrant's ``status()`` returns a list of ``Status`` namedtuples
@@ -269,7 +274,7 @@ class Vagrant(BaseVagrant):
                 "Falling back to single-VM mode."
             )
             return []
-        vm_names: list[str | None] = [vm.name for vm in status_info]
+        vm_names: list[str] = [vm.name for vm in status_info]
         self.logger.debug(f"get_vm_names status_info: {status_info}")
         self.logger.debug(f"get_vm_names extracted names: {vm_names}")
         return vm_names
@@ -431,6 +436,21 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
 
     TRACE_NAME = "vagrant_sandbox_environment"
 
+    # Printed to the guest's stderr just before exec(), read_file() and
+    # write_file() run their command.
+    # `vagrant ssh` prints its own warnings (e.g. fog's under libvirt, while
+    # it looks up the VM) before it starts ssh, and ssh then writes to the
+    # same stderr, so only what follows the marker is the command's stderr.
+    # Anything vagrant prints after ssh exits (e.g. a user-defined `after`
+    # trigger in the Vagrantfile) would still be included.
+    STDERR_MARKER: Final = "__inspect_vagrant_stderr_8f2c41a6__"
+
+    # Printed to the guest's stdout around read_file()'s base64 output.
+    # Anything else on stdout (e.g. an `echo` in the guest's ~/.bashrc or a
+    # Vagrantfile trigger) must not be decoded into the file's contents.
+    READ_FILE_START_MARKER: Final = "__inspect_vagrant_read_file_start_8f2c41a6__"
+    READ_FILE_END_MARKER: Final = "__inspect_vagrant_read_file_end_8f2c41a6__"
+
     vagrant: Vagrant
 
     def __init__(
@@ -505,7 +525,10 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         vagrant = Vagrant(root=str(sandbox_dir), env=vagrant_env)
 
         # Get available VMs before starting them
-        vm_names = await vagrant.get_vm_names()
+        # list[str | None] because when no VMs are discovered, [None] is used
+        # below to mean "the default VM" (list is invariant, so a copy is
+        # needed to widen the element type).
+        vm_names: list[str | None] = list(await vagrant.get_vm_names())
         cls.logger.debug(f"Discovered VMs in Vagrantfile: {vm_names}")
 
         # If no VMs found, assume single-VM Vagrantfile
@@ -600,22 +623,33 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
 
         sandboxes: dict[str, SandboxEnvironment] = {}
 
+        def base_vm_name(vm_name: str) -> str:
+            """Strip the per-sample unique suffix from a discovered VM name.
+
+            VM names reported by 'vagrant status' include the unique suffix
+            appended by the Vagrantfile (via INSPECT_VM_SUFFIX), e.g.
+            'attacker-sample01-abc123'. Sandbox dict keys and primary VM
+            matching use the base name from the Vagrantfile ('attacker') so
+            that eval code can reference sandboxes by a stable name.
+            """
+            return vm_name.removesuffix(unique_suffix)
+
         # Determine which VM should be the default
         # The primary_vm_name from config needs to be matched with the actual VM names (which include suffix)
         primary_vm_base = config.primary_vm_name
         primary_vm = None
 
         if primary_vm_base:
-            # Find VM that starts with the base name (handles suffix)
+            # Find VM whose base name (suffix stripped) matches
             for vm_name in vm_names:
-                if vm_name and vm_name.startswith(primary_vm_base):
+                if vm_name and base_vm_name(vm_name) == primary_vm_base:
                     primary_vm = vm_name
                     break
 
             if not primary_vm:
-                available_vms = [vm for vm in vm_names if vm is not None]
+                available_vms = [base_vm_name(vm) for vm in vm_names if vm is not None]
                 cls.logger.warning(
-                    f"Primary VM starting with '{primary_vm_base}' not found. "
+                    f"Primary VM '{primary_vm_base}' not found. "
                     f"Available VMs: {available_vms}. Using first available VM."
                 )
                 primary_vm = vm_names[0] if vm_names else None
@@ -624,18 +658,22 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
 
         # Create sandbox environments for each VM
         cls.logger.debug(f"Creating sandbox environments. Primary VM: {primary_vm}")
+        primary_env: SandboxEnvironment | None = None
         for vm_name in vm_names:
             env = VagrantSandboxEnvironment(sandbox_dir, vagrant, vm_name)
             cls.logger.debug(f"Created environment for VM: {vm_name}")
 
-            # The primary VM becomes "default"
-            if vm_name == primary_vm:
-                sandboxes["default"] = env
-                cls.logger.debug(f"Set '{vm_name}' as default sandbox environment")
-
-            # Also add by VM name if it's not None (multi-VM case)
+            # Add by base VM name if it's not None (multi-VM case)
             if vm_name is not None:
-                sandboxes[vm_name] = env
+                sandboxes[base_vm_name(vm_name)] = env
+
+            if vm_name == primary_vm:
+                primary_env = env
+
+        # The primary VM becomes "default"
+        if primary_env is not None:
+            sandboxes["default"] = primary_env
+            cls.logger.debug(f"Set '{primary_vm}' as default sandbox environment")
 
         # Ensure we always have a "default" sandbox
         if "default" not in sandboxes and sandboxes:
@@ -702,9 +740,17 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                         ["destroy", "-f"]
                     )
                     if result["returncode"] != 0:
+                        # Keep the directory: `.vagrant` inside it is the only
+                        # handle on the VM that is still running, and without it
+                        # neither `inspect sandbox cleanup vagrant` nor a manual
+                        # `vagrant destroy` can reach it.
                         cls.logger.warning(
-                            f"vagrant destroy returned {result['returncode']}: {result['stderr']}"
+                            f"vagrant destroy returned {result['returncode']}: "
+                            f"{result['stderr']}. Keeping {env.sandbox_dir.path} so "
+                            "the VM can still be destroyed; retry with: "
+                            "inspect sandbox cleanup vagrant"
                         )
+                        continue
 
                     await env.sandbox_dir.cleanup()
 
@@ -817,6 +863,27 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         timeout_retry: bool = True,
     ) -> ExecResult[str]:
         command = shlex.join(cmd)
+        if env:
+            # Keys go into the shell unquoted: `export A B=v` would export B,
+            # and `export X;id;Y=v` would run `id`
+            for key in env:
+                if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+                    raise ValueError(f"Invalid environment variable name: {key!r}")
+            # `&&`, not `;`: a failing `cd` below must abort the command rather
+            # than let it run in the wrong directory
+            exports = " ".join(
+                f"export {key}={shlex.quote(value)} &&" for key, value in env.items()
+            )
+            command = f"{exports} {command}"
+        if cwd is not None:
+            command = f"cd {shlex.quote(cwd)} && {command}"
+        if user is not None:
+            # Vagrant's base box guidelines require passwordless sudo for the
+            # SSH user, and mainstream boxes comply. Wrap the command in `sh -c`
+            # so the cwd/env handling above also runs as the target user. `-n`
+            # makes a non-compliant box fail fast ("sudo: a password is
+            # required" on stderr) instead of hanging on a password prompt.
+            command = f"sudo -H -n -u {shlex.quote(user)} sh -c {shlex.quote(command)}"
         with trace_action(
             self.logger,
             self.TRACE_NAME,
@@ -824,31 +891,120 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             "exec_command ",
         ):
             result = await self.vagrant.ssh(
-                vm_name=self.vm_name, command=command, input=input, timeout=timeout
+                vm_name=self.vm_name,
+                command=f"echo {self.STDERR_MARKER} >&2; {command}",
+                input=input,
+                timeout=timeout,
             )
 
-            return ExecResult(
+            exec_result = ExecResult(
                 success=result["returncode"] == 0,
                 returncode=result["returncode"],
                 stdout=result["stdout"],
-                stderr=result["stderr"],
+                stderr=self._guest_stderr(result["stderr"]),
             )
+            # Raise only if the shell could not execute cmd[0] itself (bash:
+            # "bash: line 1: /etc/passwd: Permission denied", dash under
+            # `user`: "sh: 1: /etc/passwd: Permission denied"). The same error
+            # from inside the command, e.g. `bash -c ./script.sh`, is the
+            # command's own result.
+            if (
+                exec_result.returncode == 126
+                and cmd
+                and exec_result.stderr.rstrip().endswith(
+                    f": {cmd[0]}: Permission denied"
+                )
+            ):
+                raise PermissionError(errno.EACCES, "Permission denied", cmd[0])
+            self._verify_exec_output_size(exec_result)
+            return exec_result
+
+    def _guest_stderr(self, stderr: str) -> str:
+        """Drop what vagrant printed to stderr before STDERR_MARKER."""
+        # No marker means ssh failed before the command ran: keep all of
+        # stderr so the failure stays debuggable.
+        _, marker, guest_stderr = stderr.partition(f"{self.STDERR_MARKER}\n")
+        return guest_stderr if marker else stderr
+
+    # _verify_exec_output_size() and _truncate_middle() are a port of
+    # inspect_ai 0.3.123's private verify_exec_result_size() and
+    # truncate_string_to_bytes(), which can't be imported: 0.3.183 removed the
+    # former. From 0.3.183 on, Inspect runs this check itself for every
+    # provider, so these can go once we require inspect_ai >= 0.3.183.
+
+    @classmethod
+    def _verify_exec_output_size(cls, exec_result: ExecResult[str]) -> None:
+        """Raise OutputLimitExceededError if stdout or stderr is over Inspect's limit."""
+        limit = SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE
+        truncated_stdout = cls._truncate_middle(exec_result.stdout, limit)
+        truncated_stderr = cls._truncate_middle(exec_result.stderr, limit)
+        if truncated_stdout is None and truncated_stderr is None:
+            return
+        stdout = exec_result.stdout if truncated_stdout is None else truncated_stdout
+        stderr = exec_result.stderr if truncated_stderr is None else truncated_stderr
+        raise OutputLimitExceededError(
+            limit_str=SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE_STR,
+            truncated_output=f"{stdout}{stderr}",
+        )
+
+    @staticmethod
+    def _truncate_middle(text: str, max_bytes: int) -> str | None:
+        """Cut text to max_bytes of UTF-8, keeping its start and end.
+
+        Returns None if text already fits.
+        """
+        encoded = text.encode("utf-8", errors="replace")
+        if len(encoded) <= max_bytes:
+            return None
+        start = encoded[: max_bytes // 2]
+        end = encoded[len(encoded) - (max_bytes - len(start)) :]
+        return (start + end).decode("utf-8", errors="replace")
+
+    @staticmethod
+    def _raise_file_error(
+        file: str, command: str, returncode: int, stdout: str, stderr: str
+    ) -> None:
+        """Map a failed file operation to the errno-style exceptions Inspect expects."""
+        if "No such file or directory" in stderr:
+            raise FileNotFoundError(errno.ENOENT, "No such file or directory", file)
+        if "Is a directory" in stderr:
+            raise IsADirectoryError(errno.EISDIR, "Is a directory", file)
+        if "Permission denied" in stderr:
+            raise PermissionError(errno.EACCES, "Permission denied", file)
+        raise subprocess.CalledProcessError(returncode, command, stdout, stderr)
 
     @override
     async def write_file(self, file: str, contents: str | bytes) -> None:
-        contents_str: str
+        contents_bytes: bytes
         if isinstance(contents, bytes):
-            contents_str = contents.decode()
+            contents_bytes = contents
         elif isinstance(contents, str):
-            contents_str = contents
+            contents_bytes = contents.encode("utf-8")
         else:
             assert_never(contents)
 
-        command = f"printf %s {shlex.quote(contents_str)} > {shlex.quote(file)}"
-        result = await self.vagrant.ssh(vm_name=self.vm_name, command=command)
+        # Transfer the content base64-encoded via stdin: this is binary-safe
+        # and avoids shell command-length limits for large files.
+        encoded = base64.b64encode(contents_bytes).decode("ascii")
+        parent = os.path.dirname(file)
+        mkdir_prefix = f"mkdir -p -- {shlex.quote(parent)} && " if parent else ""
+        # Run in the C locale: _raise_file_error() matches English messages,
+        # and ssh may forward the host's LANG/LC_* to the guest.
+        command = f"export LC_ALL=C; {mkdir_prefix}base64 -d > {shlex.quote(file)}"
+        result = await self.vagrant.ssh(
+            vm_name=self.vm_name,
+            command=f"echo {self.STDERR_MARKER} >&2; {command}",
+            input=encoded,
+        )
         if result["returncode"] != 0:
-            raise subprocess.CalledProcessError(
-                result["returncode"], command, result["stdout"]
+            if f"{self.STDERR_MARKER}\n" not in result["stderr"]:
+                # No marker: ssh failed before the command ran, not a file error
+                raise subprocess.CalledProcessError(
+                    result["returncode"], command, result["stdout"], result["stderr"]
+                )
+            stderr = self._guest_stderr(result["stderr"])
+            self._raise_file_error(
+                file, command, result["returncode"], result["stdout"], stderr
             )
 
     @overload
@@ -859,16 +1015,54 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
 
     @override
     async def read_file(self, file: str, text: bool = True) -> str | bytes:
-        command = f"cat {file}"
-        result = await self.vagrant.ssh(vm_name=self.vm_name, command=command)
+        quoted_file = shlex.quote(file)
+        # Check the file's size against Inspect's read limit before transferring
+        # it, then transfer base64-encoded so binary content survives the ssh
+        # round-trip. A single remote command keeps this to one (slow) vagrant
+        # ssh invocation.
+        size_limit = SandboxEnvironmentLimits.MAX_READ_FILE_SIZE
+        limit_marker = "inspect read_file size limit exceeded"
+        command = (
+            "export LC_ALL=C; "  # C locale, as in write_file()
+            # -L: the size of what base64 reads, not of a symlink itself
+            f"_size=$(stat -L -c %s -- {quoted_file}) && "
+            f'{{ [ "$_size" -le {size_limit} ] || '
+            f"{{ echo {shlex.quote(limit_marker)} >&2; exit 70; }}; }} && "
+            f"echo {self.READ_FILE_START_MARKER} && "
+            f"base64 -- {quoted_file} && "
+            f"echo {self.READ_FILE_END_MARKER}"
+        )
+        result = await self.vagrant.ssh(
+            vm_name=self.vm_name, command=f"echo {self.STDERR_MARKER} >&2; {command}"
+        )
         if result["returncode"] != 0:
-            raise subprocess.CalledProcessError(
-                result["returncode"], command, result["stdout"]
+            if limit_marker in result["stderr"]:
+                raise OutputLimitExceededError(
+                    limit_str=SandboxEnvironmentLimits.MAX_READ_FILE_SIZE_STR,
+                    # The potentially large content is not transferred.
+                    truncated_output=None,
+                )
+            if f"{self.STDERR_MARKER}\n" not in result["stderr"]:
+                # No marker: ssh failed before the command ran, not a file error
+                raise subprocess.CalledProcessError(
+                    result["returncode"], command, result["stdout"], result["stderr"]
+                )
+            stderr = self._guest_stderr(result["stderr"])
+            self._raise_file_error(
+                file, command, result["returncode"], result["stdout"], stderr
             )
 
+        _, start, rest = result["stdout"].partition(f"{self.READ_FILE_START_MARKER}\n")
+        encoded, end, _ = rest.partition(f"{self.READ_FILE_END_MARKER}\n")
+        if not (start and end):
+            raise RuntimeError(
+                f"Unexpected output from `vagrant ssh` reading {file}: "
+                f"{result['stdout'][:200]!r}"
+            )
+        contents = base64.b64decode(encoded.replace("\n", ""), validate=True)
         if text:
-            return result["stdout"]
-        return result["stdout"].encode("utf-8")
+            return contents.decode("utf-8")
+        return contents
 
     @override
     async def connection(self, *, user: str | None = None) -> SandboxConnection:
