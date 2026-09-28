@@ -178,39 +178,24 @@ async def test_connection_command_multi_vm():
     )
 
     try:
-        named = {
-            name: sandbox
-            for name, sandbox in sandboxes.items()
-            if name != "default" and isinstance(sandbox, VagrantSandboxEnvironment)
-        }
-        assert len(named) == 2, f"expected 2 named VMs, got {list(sandboxes)}"
-
-        # The VMs share a hostname, so tag each one through the provider's
-        # own exec() (which routes by vm_name), then check the connection
-        # command reads back the tag of the VM it was asked for.
-        for name, sandbox in named.items():
-            tag = await sandbox.exec(["bash", "-c", f"echo {name} > /tmp/conn_marker"])
-            assert tag.success
-
-        for name, sandbox in named.items():
+        # Each VM in Vagrantfile.multi sets its own hostname, so `hostname`
+        # shows which VM the connection command landed on.
+        for name in ("target", "attacker"):
+            sandbox = sandboxes[name]
+            assert isinstance(sandbox, VagrantSandboxEnvironment)
             connection = await sandbox.connection()
-            result = run_connection_command(
-                connection.command, "cat /tmp/conn_marker\n"
-            )
+            result = run_connection_command(connection.command, "hostname\n")
             assert result.returncode == 0, result.stderr
             assert name in output_lines(result), (
                 f"connection() for {name!r} landed on the wrong VM: {result.stdout!r}"
             )
 
-        # user= works on a named VM too
-        name, sandbox = next(iter(named.items()))
-        connection = await sandbox.connection(user="root")
-        result = run_connection_command(
-            connection.command, "whoami; cat /tmp/conn_marker\n"
-        )
+        # user= works on a named, non-primary VM too
+        connection = await sandboxes["target"].connection(user="root")
+        result = run_connection_command(connection.command, "whoami; hostname\n")
         assert result.returncode == 0, result.stderr
         assert "root" in output_lines(result)
-        assert name in output_lines(result)
+        assert "target" in output_lines(result)
 
         # vm_name=None in a multi-VM env: `vagrant ssh` without a machine
         # name falls back to the machine marked `primary: true` in the
@@ -218,18 +203,13 @@ async def test_connection_command_multi_vm():
         # (Without a primary machine, vagrant refuses with a clear error.)
         default = sandboxes["default"]
         assert isinstance(default, VagrantSandboxEnvironment)
-        assert default.vm_name is not None
-        assert default.vm_name.startswith("attacker")
         unnamed = VagrantSandboxEnvironment(
             default.sandbox_dir, default.vagrant, vm_name=None
         )
         connection = await unnamed.connection()
-        result = run_connection_command(connection.command, "cat /tmp/conn_marker\n")
+        result = run_connection_command(connection.command, "hostname\n")
         assert result.returncode == 0, result.stderr
-        # The marker holds the sandbox's key, which is the base VM name
-        # ("attacker"), not vm_name, which carries the per-sample suffix.
-        default_name = next(name for name, s in named.items() if s is default)
-        assert default_name in output_lines(result)
+        assert "attacker" in output_lines(result)
 
     finally:
         await VagrantSandboxEnvironment.sample_cleanup(
