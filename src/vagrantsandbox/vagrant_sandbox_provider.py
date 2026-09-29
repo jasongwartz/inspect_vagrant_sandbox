@@ -427,6 +427,13 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
     # a less privileged user can write to.
     TIMEOUT_COMMAND: Final = "/usr/bin/timeout"
 
+    # Linux limits each argument of a program to 128 KiB (MAX_ARG_STRLEN), and
+    # vagrant passes exec()'s command to ssh as a single one, `bash -l -c
+    # '<command>'` with each ' written as '\''. exec() runs a command larger
+    # than this from a file on the guest instead. The rest of the 128 KiB is
+    # room for vagrant's wrapper and the stderr marker.
+    MAX_COMMAND_SIZE: Final = 100 * 1024
+
     vagrant: Vagrant
 
     def __init__(
@@ -848,23 +855,52 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             command = f"{exports} {command}"
         if cwd is not None:
             command = f"cd {shlex.quote(cwd)} && {command}"
-        if user is not None:
+
+        def as_user(command: str) -> str:
+            if user is None:
+                return command
             # Vagrant's base box guidelines require passwordless sudo for the
             # SSH user, and mainstream boxes comply. Wrap the command in `sh -c`
             # so the cwd/env handling above also runs as the target user. `-n`
             # makes a non-compliant box fail fast ("sudo: a password is
             # required" on stderr) instead of hanging on a password prompt.
-            command = f"sudo -H -n -u {shlex.quote(user)} sh -c {shlex.quote(command)}"
+            return f"sudo -H -n -u {shlex.quote(user)} sh -c {shlex.quote(command)}"
+
         with trace_action(
             self.logger,
             self.TRACE_NAME,
             # f"exec_command {self.vm_id=} {exec_response_pid=}",
             "exec_command ",
         ):
+            quoted_by_vagrant = as_user(command).replace("'", "'\\''")
+            if len(quoted_by_vagrant.encode("utf-8")) > self.MAX_COMMAND_SIZE:
+                # Upload the command base64-encoded via stdin, as write_file()
+                # does, and source it, so that the shell that would have run
+                # it (vagrant's `bash -l`, or `sh` for `user`) still does. The
+                # name is chosen here so it needn't be read back from stdout;
+                # `set -C` won't write to an existing file, as with mktemp.
+                # The script deletes itself first: the shell has it open.
+                script = f"/tmp/inspect-exec-{uuid.uuid4().hex}"
+                upload = f"set -C && umask 077 && base64 -d > {script}"
+                uploaded = await self.vagrant.ssh(
+                    vm_name=self.vm_name,
+                    command=f"echo {self.STDERR_MARKER} >&2; {as_user(upload)}",
+                    input=base64.b64encode(
+                        f"rm -f -- {script}\n{command}".encode("utf-8")
+                    ).decode("ascii"),
+                    timeout=None if timeout is None else timeout + 30,
+                )
+                if uploaded["returncode"] != 0:
+                    raise RuntimeError(
+                        f"Could not upload the command to {script} on the guest "
+                        f"(exit status {uploaded['returncode']}): "
+                        f"{self._guest_stderr(uploaded['stderr']).strip()}"
+                    )
+                command = f". {script}"
             start = time.monotonic()
             result = await self.vagrant.ssh(
                 vm_name=self.vm_name,
-                command=f"echo {self.STDERR_MARKER} >&2; {command}",
+                command=f"echo {self.STDERR_MARKER} >&2; {as_user(command)}",
                 input=input,
                 # Only a fallback for a hung vagrant or ssh: the guest's timeout
                 # returns within timeout + 5s of the command starting, and
