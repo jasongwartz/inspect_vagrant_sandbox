@@ -511,6 +511,136 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_exec_large_command(self, tmp_path, mock_sandbox_dir):
+        """Commands over Linux's 128 KiB limit on an argument still run.
+
+        Runs exec() against a stand-in for `vagrant ssh --command` that, like
+        vagrant, passes the command on to a real shell as a single argument,
+        `bash -c '<command>'` with each ' written as '\\''.
+        """
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        # A stand-in for sudo that drops `-H -n -u USER` and runs the rest
+        sudo = bin_dir / "sudo"
+        sudo.write_text('#!/bin/sh\nshift 4\nexec "$@"\n')
+        sudo.chmod(0o755)
+        vagrant = Vagrant(
+            root=str(tmp_path),
+            env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+        )
+        vagrant._make_vagrant_command = lambda args: [
+            "bash",
+            "-c",
+            "bash -c '" + args[-1].replace("'", "'\\''") + "'",
+        ]
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant)
+        script = tmp_path / "run.sh"
+        script.write_text("echo hi\n")
+        script.chmod(0o644)
+        # As in Inspect's self_check test_exec_large_command: ~1 MiB of arguments
+        chunks = ["x" * 65536] * 16
+
+        result = await env.exec(["printf", "%s", *chunks])
+        assert (result.returncode, result.stdout, result.stderr) == (
+            0,
+            "".join(chunks),
+            "",
+        )
+
+        # Under the limit, and still once `user` has quoted each ', but not once
+        # vagrant has too
+        result = await env.exec(["printf", "%s", "'" * 3000], user="someone")
+        assert (result.returncode, result.stdout) == (0, "'" * 3000)
+
+        # Under the limit, but not with the stderr marker and sudo around it
+        arg = "x" * (128 * 1024 - 64)
+        result = await env.exec(["printf", "%s", arg], user="someone")
+        assert (result.returncode, result.stdout) == (0, arg)
+
+        # The input follows the command on stdin
+        result = await env.exec(
+            ["sh", "-c", 'cat; pwd; echo "$KEY"; exit 3', "sh", *chunks[:4]],
+            input="stdin\n",
+            cwd=str(tmp_path),
+            env={"KEY": "value"},
+            user="someone",
+        )
+        assert (result.returncode, result.stdout, result.stderr) == (
+            3,
+            f"stdin\n{tmp_path}\nvalue\n",
+            "",
+        )
+
+        with pytest.raises(PermissionError):
+            await env.exec([str(script), *chunks[:2]])
+
+        # Encoded as an argument would be, and a NUL rejected as in one
+        od = ["sh", "-c", 'printf %s "$1" | od -An -tx1', "sh", "\udcff"]
+        result = await env.exec([*od, *chunks[:2]])
+        assert result.stdout.split() == ["ff"]
+        with pytest.raises(ValueError, match="null byte"):
+            await env.exec(["printf", "%s", "a\0b", *chunks[:2]])
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("received", [0, 10, 150_000])
+    async def test_exec_large_command_cut_short(
+        self, tmp_path, mock_sandbox_dir, received
+    ):
+        """If the guest gets only part of a large command, none of it runs."""
+        vagrant = Vagrant(root=str(tmp_path))
+        vagrant._make_vagrant_command = lambda args: [
+            "bash",
+            "-c",
+            f"head -c {received} | bash -c '" + args[-1].replace("'", "'\\''") + "'",
+        ]
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant)
+
+        result = await env.exec(["sh", "-c", "echo ran", "sh", *["x" * 65536] * 4])
+
+        # A syntax error: the `{` it starts with is never closed
+        assert (result.returncode, result.stdout) == (2, "")
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_large_command_dd_error(self, tmp_path, mock_sandbox_dir):
+        """If the guest's dd can't read a large command, its error is in stderr."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        dd = bin_dir / "dd"
+        dd.write_text("#!/bin/sh\necho 'dd: invalid input flag' >&2\nexit 1\n")
+        dd.chmod(0o755)
+        vagrant = Vagrant(
+            root=str(tmp_path),
+            env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+        )
+        vagrant._make_vagrant_command = lambda args: ["bash", "-c", args[-1]]
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant)
+
+        result = await env.exec(["sh", "-c", "echo ran", "sh", *["x" * 65536] * 4])
+
+        assert (result.returncode, result.stdout) == (2, "")
+        assert "dd: invalid input flag" in result.stderr
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_command_under_size_limit(self, mock_vagrant, mock_sandbox_dir):
+        """A command under MAX_COMMAND_SIZE is sent as is."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
+        arg = "x" * (VagrantSandboxEnvironment.MAX_COMMAND_SIZE - 100)
+
+        await env.exec(["true", arg], input="data")
+
+        mock_vagrant.ssh.assert_called_once_with(
+            vm_name=None,
+            command=EXEC_PREFIX + f"true {arg}",
+            input="data",
+            timeout=None,
+        )
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_exec_escapes_shell_metacharacters(
         self, mock_vagrant, mock_sandbox_dir
     ):
