@@ -6,6 +6,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import time
 import uuid
 from dataclasses import dataclass
 from logging import getLogger
@@ -38,7 +39,6 @@ from inspect_ai.util import (
     sandboxenv,
     trace_action,
 )
-from inspect_ai.util._subprocess import default_max_subprocesses
 from platformdirs import user_cache_dir
 from pydantic import BaseModel, Field, field_validator
 from vagrant import Status, Vagrant as BaseVagrant
@@ -418,6 +418,18 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
     READ_FILE_START_MARKER: Final = "__inspect_vagrant_read_file_start_8f2c41a6__"
     READ_FILE_END_MARKER: Final = "__inspect_vagrant_read_file_end_8f2c41a6__"
 
+    # Runs exec()'s command in the guest when it has a timeout. By absolute
+    # path: it runs as `user`, so it must not be looked up through a PATH that
+    # a less privileged user can write to.
+    TIMEOUT_COMMAND: Final = "/usr/bin/timeout"
+
+    # Linux limits each argument of a program to 128 KiB (MAX_ARG_STRLEN), and
+    # vagrant passes exec()'s command to ssh as a single one, `bash -l -c
+    # '<command>'` with each ' written as '\''. exec() sends a command larger
+    # than this on stdin instead. The rest of the 128 KiB is room for
+    # vagrant's wrapper, the stderr marker and `user`'s sudo.
+    MAX_COMMAND_SIZE: Final = 100 * 1024
+
     vagrant: Vagrant
 
     def __init__(
@@ -434,10 +446,10 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
     def default_concurrency(cls) -> int | None:
         """Default concurrent sandbox limit for vagrant environments.
 
-        VMs are resource-intensive, so limit to cpu_count().
+        VMs are resource-intensive, so limit to process_cpu_count().
         Can be overridden via --max-sandboxes flag.
         """
-        return default_max_subprocesses()
+        return os.process_cpu_count() or 1
 
     @classmethod
     async def task_init(
@@ -815,6 +827,19 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         timeout_retry: bool = True,
     ) -> ExecResult[str]:
         command = shlex.join(cmd)
+        if timeout is not None:
+            # `timeout 0s` would mean no timeout at all
+            if timeout <= 0:
+                raise ValueError(f"timeout must be positive, got {timeout}")
+            # On a timeout the host kills `vagrant ssh`, but sshd doesn't signal
+            # a --no-tty command when its connection drops, so the command would
+            # keep running in the guest. GNU timeout signals its whole process
+            # group, so the command's children die too, and SIGKILLs it 5s
+            # later if it ignores SIGTERM. Wrapped before the env/cwd/user
+            # handling below, it runs as `user`.
+            command = shlex.join(
+                [self.TIMEOUT_COMMAND, "-k", "5s", f"{timeout}s", *cmd]
+            )
         if env:
             # Keys go into the shell unquoted: `export A B=v` would export B,
             # and `export X;id;Y=v` would run `id`
@@ -829,25 +854,44 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             command = f"{exports} {command}"
         if cwd is not None:
             command = f"cd {shlex.quote(cwd)} && {command}"
-        if user is not None:
-            # Vagrant's base box guidelines require passwordless sudo for the
-            # SSH user, and mainstream boxes comply. Wrap the command in `sh -c`
-            # so the cwd/env handling above also runs as the target user. `-n`
-            # makes a non-compliant box fail fast ("sudo: a password is
-            # required" on stderr) instead of hanging on a password prompt.
-            command = f"sudo -H -n -u {shlex.quote(user)} sh -c {shlex.quote(command)}"
+        # As `user` quotes it for `sh -c`, and vagrant then quotes it
+        command_size = len(os.fsencode(shlex.quote(command).replace("'", "'\\''")))
+        if command_size <= self.MAX_COMMAND_SIZE:
+            ssh_command = self._as_user(command, user)
+            ssh_input = input
+        else:
+            # Send it ahead of `input`, for the shell to read exactly (dd, unlike
+            # BusyBox's `head -c`, doesn't read past it) and eval. Cut short, it
+            # leaves the `{` unclosed: a syntax error, so none of it runs. As in
+            # an argument, it can't hold a NUL (the shell would drop it), and
+            # it's fsencoded. status=none keeps dd's summary off stderr, but not
+            # its errors.
+            if "\0" in command:
+                raise ValueError("embedded null byte")
+            script = os.fsencode(f"{command}\n}}")
+            reader = f"dd bs={len(script)} count=1 iflag=fullblock status=none"
+            ssh_command = self._as_user(f'eval "{{ $({reader})"', user)
+            ssh_input = script + (
+                input.encode() if isinstance(input, str) else input or b""
+            )
         with trace_action(
             self.logger,
             self.TRACE_NAME,
             # f"exec_command {self.vm_id=} {exec_response_pid=}",
             "exec_command ",
         ):
+            start = time.monotonic()
             result = await self.vagrant.ssh(
                 vm_name=self.vm_name,
-                command=f"echo {self.STDERR_MARKER} >&2; {command}",
-                input=input,
-                timeout=timeout,
+                command=f"echo {self.STDERR_MARKER} >&2; {ssh_command}",
+                input=ssh_input,
+                # Only a fallback for a hung vagrant or ssh: the guest's timeout
+                # returns within timeout + 5s of the command starting, and
+                # vagrant takes several seconds (more under load) to load the
+                # Vagrantfile, look up the VM and connect before it starts.
+                timeout=None if timeout is None else timeout + 30,
             )
+            elapsed = time.monotonic() - start
 
             exec_result = ExecResult(
                 success=result["returncode"] == 0,
@@ -855,16 +899,32 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                 stdout=result["stdout"],
                 stderr=self._guest_stderr(result["stderr"]),
             )
+            # The guest's timeout fired: GNU timeout exits 124 when SIGTERM
+            # stopped the command and 137 when it had to SIGKILL it, BusyBox's
+            # exits 143. A command killed by those signals for another reason
+            # (e.g. the OOM killer, or `kill $$`) exits 137 or 143 too, so those
+            # only count once the timeout has passed.
+            if timeout is not None and exec_result.returncode in (124, 137, 143):
+                if exec_result.returncode == 124 or elapsed >= timeout:
+                    raise TimeoutError(f"Command timed out after {timeout} seconds")
             # Raise only if the shell could not execute cmd[0] itself (bash:
             # "bash: line 1: /etc/passwd: Permission denied", dash under
             # `user`: "sh: 1: /etc/passwd: Permission denied"). The same error
             # from inside the command, e.g. `bash -c ./script.sh`, is the
-            # command's own result.
+            # command's own result. With a timeout, GNU timeout is what can't
+            # execute cmd[0]: "/usr/bin/timeout: failed to run command
+            # '/etc/passwd': Permission denied" (‘/etc/passwd’ in UTF-8 locales).
             if (
                 exec_result.returncode == 126
                 and cmd
                 and exec_result.stderr.rstrip().endswith(
                     f": {cmd[0]}: Permission denied"
+                    if timeout is None
+                    else tuple(
+                        f"{self.TIMEOUT_COMMAND}: failed to run command "
+                        f"{quoted}: Permission denied"
+                        for quoted in (f"'{cmd[0]}'", f"‘{cmd[0]}’")
+                    )
                 )
             ):
                 raise PermissionError(errno.EACCES, "Permission denied", cmd[0])
@@ -877,6 +937,18 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         # stderr so the failure stays debuggable.
         _, marker, guest_stderr = stderr.partition(f"{self.STDERR_MARKER}\n")
         return guest_stderr if marker else stderr
+
+    @staticmethod
+    def _as_user(command: str, user: str | None) -> str:
+        """Wrap command to run as user, if one is given."""
+        if user is None:
+            return command
+        # Vagrant's base box guidelines require passwordless sudo for the SSH
+        # user, and mainstream boxes comply. Wrap the command in `sh -c` so
+        # exec()'s cwd/env handling also runs as the target user. `-n` makes a
+        # non-compliant box fail fast ("sudo: a password is required" on
+        # stderr) instead of hanging on a password prompt.
+        return f"sudo -H -n -u {shlex.quote(user)} sh -c {shlex.quote(command)}"
 
     # _verify_exec_output_size() and _truncate_middle() are a port of
     # inspect_ai 0.3.123's private verify_exec_result_size() and
@@ -1031,7 +1103,19 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
            ConnectionError: If sandbox is not currently running.
         """
         sandbox_path = str(self.sandbox_dir)
-        return SandboxConnection(
-            type="vagrant",
-            command=f"VAGRANT_CWD={sandbox_path} vagrant ssh",
-        )
+        command = f"VAGRANT_CWD={shlex.quote(sandbox_path)} vagrant ssh"
+        vm_suffix = (self.vagrant.env or {}).get("INSPECT_VM_SUFFIX")
+        if vm_suffix:
+            # The test/sample Vagrantfiles derive machine names from
+            # INSPECT_VM_SUFFIX, so vagrant must re-evaluate the Vagrantfile
+            # with the same suffix or it won't find the created machine.
+            command = f"INSPECT_VM_SUFFIX={shlex.quote(vm_suffix)} {command}"
+        if self.vm_name is not None:
+            # Without the VM name, `vagrant ssh` fails in a multi-VM environment
+            command = f"{command} {shlex.quote(self.vm_name)}"
+        if user is not None:
+            # `vagrant ssh` always logs in as the box's ssh user, so switch to
+            # the requested user with a sudo login shell.
+            login = f"sudo -u {shlex.quote(user)} -i"
+            command = f"{command} -c {shlex.quote(login)}"
+        return SandboxConnection(type="vagrant", command=command)
