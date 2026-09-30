@@ -427,6 +427,13 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
     # a less privileged user can write to.
     TIMEOUT_COMMAND: Final = "/usr/bin/timeout"
 
+    # Linux limits each argument of a program to 128 KiB (MAX_ARG_STRLEN), and
+    # vagrant passes exec()'s command to ssh as a single one, `bash -l -c
+    # '<command>'` with each ' written as '\''. exec() sends a command larger
+    # than this on stdin instead. The rest of the 128 KiB is room for
+    # vagrant's wrapper, the stderr marker and `user`'s sudo.
+    MAX_COMMAND_SIZE: Final = 100 * 1024
+
     vagrant: Vagrant
 
     def __init__(
@@ -848,6 +855,23 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             command = f"{exports} {command}"
         if cwd is not None:
             command = f"cd {shlex.quote(cwd)} && {command}"
+        # Measured as `user` quotes it for `sh -c`, and vagrant then quotes it
+        quoted = shlex.quote(command).replace("'", "'\\''")
+        if len(os.fsencode(quoted)) > self.MAX_COMMAND_SIZE:
+            # Send it ahead of `input`, for the shell to read exactly (dd, unlike
+            # BusyBox's `head -c`, doesn't read past it) and eval. Cut short, it
+            # leaves the `{` unclosed: a syntax error, so none of it runs. As in
+            # an argument, it can't hold a NUL (the shell would drop it), and
+            # it's fsencoded. status=none keeps dd's summary off stderr, but not
+            # its errors.
+            if "\0" in command:
+                raise ValueError("embedded null byte")
+            script = os.fsencode(f"{command}\n}}")
+            reader = f"dd bs={len(script)} count=1 iflag=fullblock status=none"
+            command = f'eval "{{ $({reader})"'
+            input = script + (
+                input.encode() if isinstance(input, str) else input or b""
+            )
         if user is not None:
             # Vagrant's base box guidelines require passwordless sudo for the
             # SSH user, and mainstream boxes comply. Wrap the command in `sh -c`
