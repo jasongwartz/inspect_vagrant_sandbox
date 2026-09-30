@@ -54,6 +54,9 @@ async def test_self_check() -> None:
     results: dict[str, bool | str] = {}
     try:
         for check in checks:
+            import time as _t
+
+            _start = _t.monotonic()
             try:
                 await check(sandbox_env=sandbox)
                 results[check.__name__] = True
@@ -61,6 +64,7 @@ async def test_self_check() -> None:
                 results[check.__name__] = f"FAILED: [{e}]"
             except Exception as e:
                 results[check.__name__] = f"ERROR: [{e!r}]"
+            print(f"CHECKTIME {check.__name__} {_t.monotonic() - _start:.2f}s")
     finally:
         await VagrantSandboxEnvironment.sample_cleanup(
             "self_check",
