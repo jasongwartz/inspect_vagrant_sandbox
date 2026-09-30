@@ -520,9 +520,10 @@ class TestVagrantSandboxEnvironment:
         """
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()
-        # A stand-in for sudo that drops `-H -n -u USER` and runs the rest
+        # A stand-in for sudo that runs what follows `-H -n -u USER`, with USER
+        # in $RAN_AS
         sudo = bin_dir / "sudo"
-        sudo.write_text('#!/bin/sh\nshift 4\nexec "$@"\n')
+        sudo.write_text('#!/bin/sh\nexport RAN_AS="$4"\nshift 4\nexec "$@"\n')
         sudo.chmod(0o755)
         vagrant = Vagrant(
             root=str(tmp_path),
@@ -559,7 +560,7 @@ class TestVagrantSandboxEnvironment:
 
         # The input follows the command on stdin
         result = await env.exec(
-            ["sh", "-c", 'cat; pwd; echo "$KEY"; exit 3', "sh", *chunks[:4]],
+            ["sh", "-c", 'cat; pwd; echo "$KEY $RAN_AS"; exit 3', "sh", *chunks[:4]],
             input="stdin\n",
             cwd=str(tmp_path),
             env={"KEY": "value"},
@@ -567,7 +568,7 @@ class TestVagrantSandboxEnvironment:
         )
         assert (result.returncode, result.stdout, result.stderr) == (
             3,
-            f"stdin\n{tmp_path}\nvalue\n",
+            f"stdin\n{tmp_path}\nvalue someone\n",
             "",
         )
 

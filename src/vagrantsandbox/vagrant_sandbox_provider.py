@@ -854,9 +854,12 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             command = f"{exports} {command}"
         if cwd is not None:
             command = f"cd {shlex.quote(cwd)} && {command}"
-        # Measured as `user` quotes it for `sh -c`, and vagrant then quotes it
-        quoted = shlex.quote(command).replace("'", "'\\''")
-        if len(os.fsencode(quoted)) > self.MAX_COMMAND_SIZE:
+        # As `user` quotes it for `sh -c`, and vagrant then quotes it
+        command_size = len(os.fsencode(shlex.quote(command).replace("'", "'\\''")))
+        if command_size <= self.MAX_COMMAND_SIZE:
+            ssh_command = self._as_user(command, user)
+            ssh_input = input
+        else:
             # Send it ahead of `input`, for the shell to read exactly (dd, unlike
             # BusyBox's `head -c`, doesn't read past it) and eval. Cut short, it
             # leaves the `{` unclosed: a syntax error, so none of it runs. As in
@@ -867,17 +870,10 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                 raise ValueError("embedded null byte")
             script = os.fsencode(f"{command}\n}}")
             reader = f"dd bs={len(script)} count=1 iflag=fullblock status=none"
-            command = f'eval "{{ $({reader})"'
-            input = script + (
+            ssh_command = self._as_user(f'eval "{{ $({reader})"', user)
+            ssh_input = script + (
                 input.encode() if isinstance(input, str) else input or b""
             )
-        if user is not None:
-            # Vagrant's base box guidelines require passwordless sudo for the
-            # SSH user, and mainstream boxes comply. Wrap the command in `sh -c`
-            # so the cwd/env handling above also runs as the target user. `-n`
-            # makes a non-compliant box fail fast ("sudo: a password is
-            # required" on stderr) instead of hanging on a password prompt.
-            command = f"sudo -H -n -u {shlex.quote(user)} sh -c {shlex.quote(command)}"
         with trace_action(
             self.logger,
             self.TRACE_NAME,
@@ -887,8 +883,8 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             start = time.monotonic()
             result = await self.vagrant.ssh(
                 vm_name=self.vm_name,
-                command=f"echo {self.STDERR_MARKER} >&2; {command}",
-                input=input,
+                command=f"echo {self.STDERR_MARKER} >&2; {ssh_command}",
+                input=ssh_input,
                 # Only a fallback for a hung vagrant or ssh: the guest's timeout
                 # returns within timeout + 5s of the command starting, and
                 # vagrant takes several seconds (more under load) to load the
@@ -941,6 +937,18 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         # stderr so the failure stays debuggable.
         _, marker, guest_stderr = stderr.partition(f"{self.STDERR_MARKER}\n")
         return guest_stderr if marker else stderr
+
+    @staticmethod
+    def _as_user(command: str, user: str | None) -> str:
+        """Wrap command to run as user, if one is given."""
+        if user is None:
+            return command
+        # Vagrant's base box guidelines require passwordless sudo for the SSH
+        # user, and mainstream boxes comply. Wrap the command in `sh -c` so
+        # exec()'s cwd/env handling also runs as the target user. `-n` makes a
+        # non-compliant box fail fast ("sudo: a password is required" on
+        # stderr) instead of hanging on a password prompt.
+        return f"sudo -H -n -u {shlex.quote(user)} sh -c {shlex.quote(command)}"
 
     # _verify_exec_output_size() and _truncate_middle() are a port of
     # inspect_ai 0.3.123's private verify_exec_result_size() and
