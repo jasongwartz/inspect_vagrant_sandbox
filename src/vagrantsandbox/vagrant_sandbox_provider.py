@@ -501,17 +501,11 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         vagrant = Vagrant(root=str(sandbox_dir), env=vagrant_env)
 
         try:
-            # Get available VMs before starting them. Vagrant defines at least
-            # one machine for any Vagrantfile it accepts, so an empty result
-            # means something is wrong: fail now, before `vagrant up`.
+            # Get available VMs before starting them
             vm_names = await vagrant.get_vm_names()
             cls.logger.debug(f"Discovered VMs in Vagrantfile: {vm_names}")
             if not vm_names:
-                raise RuntimeError(
-                    "No VMs were discovered in the Vagrantfile at "
-                    f"'{config.vagrantfile_path}'. Inspect requires a default "
-                    "sandbox, so at least one VM must be defined."
-                )
+                raise RuntimeError(f"No VMs found in {config.vagrantfile_path}")
 
             # Start all VMs
             cls.logger.info(f"Starting VMs: {vm_names}")
@@ -616,19 +610,19 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         if primary_vm_base:
             # Find VM whose base name (suffix stripped) matches
             for vm_name in vm_names:
-                if base_vm_name(vm_name) == primary_vm_base:
+                if vm_name and base_vm_name(vm_name) == primary_vm_base:
                     primary_vm = vm_name
                     break
 
             if not primary_vm:
-                available_vms = [base_vm_name(vm) for vm in vm_names]
+                available_vms = [base_vm_name(vm) for vm in vm_names if vm is not None]
                 cls.logger.warning(
                     f"Primary VM '{primary_vm_base}' not found. "
                     f"Available VMs: {available_vms}. Using first available VM."
                 )
-                primary_vm = vm_names[0]
+                primary_vm = vm_names[0] if vm_names else None
         else:
-            primary_vm = vm_names[0]
+            primary_vm = vm_names[0] if vm_names else None
 
         # Create sandbox environments for each VM
         cls.logger.debug(f"Creating sandbox environments. Primary VM: {primary_vm}")
@@ -637,7 +631,9 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             env = VagrantSandboxEnvironment(sandbox_dir, vagrant, vm_name)
             cls.logger.debug(f"Created environment for VM: {vm_name}")
 
-            sandboxes[base_vm_name(vm_name)] = env
+            # Add by base VM name if it's not None (multi-VM case)
+            if vm_name is not None:
+                sandboxes[base_vm_name(vm_name)] = env
 
             if vm_name == primary_vm:
                 primary_env = env
