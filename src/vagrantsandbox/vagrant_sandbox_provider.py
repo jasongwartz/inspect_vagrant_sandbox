@@ -243,6 +243,27 @@ class Vagrant(BaseVagrant):
         self.logger.debug(f"get_vm_names extracted names: {vm_names}")
         return vm_names
 
+    @override
+    def _run_vagrant_command(self, args: list[str | None]) -> str:
+        """Run a vagrant command and return its stdout, as python-vagrant does.
+
+        python-vagrant's sends stderr to /dev/null, which is where vagrant
+        says why a Vagrantfile didn't load.
+        """
+        try:
+            return subprocess.run(
+                self._make_vagrant_command(args),
+                cwd=self.root,
+                env=self.env,
+                capture_output=True,
+                check=True,
+                encoding="utf-8",
+            ).stdout
+        except subprocess.CalledProcessError as e:
+            # Inspect reports this as the sample's error, so it must say why
+            e.add_note(e.stdout + e.stderr)
+            raise
+
     async def _run_vagrant_command_async(
         self,
         args: list[str | None],
