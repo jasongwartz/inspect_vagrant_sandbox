@@ -232,28 +232,37 @@ class Vagrant(BaseVagrant):
     async def get_vm_names(self) -> list[str]:
         """Get list of VM names defined in the Vagrantfile.
 
-        Parsed as python-vagrant's ``status()`` does: a list of ``Status`` namedtuples
+        python-vagrant's ``status()`` returns a list of ``Status`` namedtuples
         with fields ``(name, state, provider)`` - one per machine defined in
         the Vagrantfile, whether or not it has been created yet.
         """
-        # Not python-vagrant's status() itself: it sends vagrant's stderr to
-        # /dev/null, which is where vagrant says why a Vagrantfile didn't load.
-        result = await self._run_vagrant_command_async(["status", "--machine-readable"])
-        if result["returncode"] != 0:
-            error = subprocess.CalledProcessError(
-                result["returncode"], ["vagrant", "status", "--machine-readable"]
-            )
-            error.stdout = result["stdout"]
-            error.stderr = result["stderr"]
-            # Inspect reports this exception as the sample's error, so it must
-            # say why: on stderr if the Vagrantfile didn't load, else on stdout.
-            error.add_note((result["stdout"] + result["stderr"]).rstrip())
-            raise error
-        status_info: list[Status] = self._parse_status(result["stdout"])
+        # Use python-vagrant's built-in status method
+        status_info: list[Status] = await _run_in_executor(self.status)
         vm_names: list[str] = [vm.name for vm in status_info]
         self.logger.debug(f"get_vm_names status_info: {status_info}")
         self.logger.debug(f"get_vm_names extracted names: {vm_names}")
         return vm_names
+
+    @override
+    def _run_vagrant_command(self, args: list[str | None]) -> str:
+        """Run a vagrant command and return its stdout, as python-vagrant does.
+
+        python-vagrant's sends stderr to /dev/null, which is where vagrant
+        says why a Vagrantfile didn't load.
+        """
+        try:
+            return subprocess.run(
+                self._make_vagrant_command(args),
+                cwd=self.root,
+                env=self.env,
+                capture_output=True,
+                check=True,
+                encoding="utf-8",
+            ).stdout
+        except subprocess.CalledProcessError as e:
+            # Inspect reports this as the sample's error, so it must say why
+            e.add_note(e.stdout + e.stderr)
+            raise
 
     async def _run_vagrant_command_async(
         self,
