@@ -236,15 +236,8 @@ class Vagrant(BaseVagrant):
         with fields ``(name, state, provider)`` - one per machine defined in
         the Vagrantfile, whether or not it has been created yet.
         """
-        try:
-            # Use python-vagrant's built-in status method
-            status_info: list[Status] = await _run_in_executor(self.status)
-        except (subprocess.SubprocessError, OSError) as e:
-            self.logger.warning(
-                f"'vagrant status' failed while discovering VM names: {e}. "
-                "Falling back to single-VM mode."
-            )
-            return []
+        # Use python-vagrant's built-in status method
+        status_info: list[Status] = await _run_in_executor(self.status)
         vm_names: list[str] = [vm.name for vm in status_info]
         self.logger.debug(f"get_vm_names status_info: {status_info}")
         self.logger.debug(f"get_vm_names extracted names: {vm_names}")
@@ -507,21 +500,13 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
 
         vagrant = Vagrant(root=str(sandbox_dir), env=vagrant_env)
 
-        # Get available VMs before starting them
-        # list[str | None] because when no VMs are discovered, [None] is used
-        # below to mean "the default VM" (list is invariant, so a copy is
-        # needed to widen the element type).
-        vm_names: list[str | None] = list(await vagrant.get_vm_names())
-        cls.logger.debug(f"Discovered VMs in Vagrantfile: {vm_names}")
-
-        # If no VMs found, assume single-VM Vagrantfile
-        if not vm_names:
-            cls.logger.warning(
-                "No VMs discovered via 'vagrant status', assuming single-VM Vagrantfile"
-            )
-            vm_names = [None]  # None means default/single VM
-
         try:
+            # Get available VMs before starting them
+            vm_names = await vagrant.get_vm_names()
+            cls.logger.debug(f"Discovered VMs in Vagrantfile: {vm_names}")
+            if not vm_names:
+                raise RuntimeError(f"No VMs found in {config.vagrantfile_path}")
+
             # Start all VMs
             cls.logger.info(f"Starting VMs: {vm_names}")
             cls.logger.debug(f"Vagrant working directory: {sandbox_dir.path}")

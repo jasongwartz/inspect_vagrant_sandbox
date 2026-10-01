@@ -104,11 +104,17 @@ def mock_sandbox_patches():
             return_value=mock_sandbox,
         ) as mock_create,
         patch("asyncio.to_thread", new_callable=AsyncMock) as mock_to_thread,
+        patch(
+            "vagrantsandbox.vagrant_sandbox_provider.Vagrant.get_vm_names",
+            new_callable=AsyncMock,
+            return_value=["default"],
+        ) as mock_get_vm_names,
     ):
         yield {
             "create": mock_create,
             "to_thread": mock_to_thread,
             "sandbox": mock_sandbox,
+            "get_vm_names": mock_get_vm_names,
         }
 
 
@@ -313,6 +319,33 @@ class TestVagrantSandboxEnvironment:
             mock_cleanup.return_value = None
 
             with pytest.raises(subprocess.CalledProcessError):
+                await VagrantSandboxEnvironment.sample_init(
+                    "test_task", sample_config, {}
+                )
+
+            mock_cleanup.assert_awaited_once()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "discovery, error",
+        [
+            (
+                {"side_effect": subprocess.CalledProcessError(1, ["vagrant"])},
+                subprocess.CalledProcessError,
+            ),
+            ({"return_value": []}, RuntimeError),
+        ],
+    )
+    async def test_sample_init_fails_when_discovery_fails(
+        self, sample_config, mock_sandbox_patches, discovery, error
+    ):
+        """A failed or empty VM discovery fails the sample and its cleanup runs."""
+        mock_sandbox_patches["get_vm_names"].configure_mock(**discovery)
+        with patch(
+            "vagrantsandbox.vagrant_sandbox_provider.cleanup_sandbox_with_vms"
+        ) as mock_cleanup:
+            with pytest.raises(error):
                 await VagrantSandboxEnvironment.sample_init(
                     "test_task", sample_config, {}
                 )
