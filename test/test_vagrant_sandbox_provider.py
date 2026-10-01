@@ -482,7 +482,11 @@ class TestVagrantSandboxEnvironment:
         assert result.stdout == "command output"
         assert result.stderr == ""
         mock_vagrant.ssh.assert_called_once_with(
-            vm_name="default", command=EXEC_PREFIX + "ls -la", input=None, timeout=None
+            vm_name="default",
+            command=EXEC_PREFIX + "ls -la",
+            input=None,
+            timeout=None,
+            output_limit=SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE,
         )
 
     @pytest.mark.unit
@@ -701,6 +705,7 @@ class TestVagrantSandboxEnvironment:
             command=EXEC_PREFIX + f"true {arg}",
             input="data",
             timeout=None,
+            output_limit=SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE,
         )
 
     @pytest.mark.unit
@@ -892,68 +897,27 @@ class TestVagrantSandboxEnvironment:
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_exec_output_over_limit(self, mock_vagrant, mock_sandbox_dir):
-        """Test that output larger than 10 MiB raises OutputLimitExceededError."""
+        """Output cut off at the limit raises with what was read of both streams.
+
+        The cut-off stderr isn't checked for a PermissionError.
+        """
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         mock_vagrant.ssh.return_value = {
-            "returncode": 0,
-            "stdout": "x" * (10 * 1024**2 + 1),
-            "stderr": "",
-        }
-
-        with pytest.raises(OutputLimitExceededError):
-            await env.exec(["cat", "big"])
-
-    @pytest.mark.unit
-    @pytest.mark.asyncio
-    async def test_exec_stderr_over_limit(self, mock_vagrant, mock_sandbox_dir):
-        """stderr has its own 10 MiB limit; the error keeps both ends of it."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
-        limit = 10 * 1024**2
-        mock_vagrant.ssh.return_value = {
-            "returncode": 1,
+            "returncode": 126,
             "stdout": "out",
-            "stderr": "<" + "x" * limit + ">",
+            "stderr": "[fog][WARNING] host noise\n"
+            f"{VagrantSandboxEnvironment.STDERR_MARKER}\n"
+            "bash: line 1: /etc/passwd: Permission denied",
+            "truncated": True,
         }
 
         with pytest.raises(OutputLimitExceededError) as exc_info:
-            await env.exec(["cat", "big"])
+            await env.exec(["/etc/passwd"])
 
         assert exc_info.value.limit_str == "10 MiB"
-        assert exc_info.value.truncated_output == "out<" + "x" * (limit - 2) + ">"
-
-    @pytest.mark.unit
-    @pytest.mark.asyncio
-    async def test_exec_output_over_limit_in_bytes(
-        self, mock_vagrant, mock_sandbox_dir
-    ):
-        """The limit counts UTF-8 bytes, not characters."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
-        mock_vagrant.ssh.return_value = {
-            "returncode": 0,
-            "stdout": "é" * (5 * 1024**2 + 1),  # 10 MiB + 2 bytes
-            "stderr": "",
-        }
-
-        with pytest.raises(OutputLimitExceededError):
-            await env.exec(["cat", "big"])
-
-    @pytest.mark.unit
-    @pytest.mark.asyncio
-    async def test_exec_output_at_limit(self, mock_vagrant, mock_sandbox_dir):
-        """Each stream may be exactly 10 MiB."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
-        stdout = "x" * (10 * 1024**2)
-        stderr = "é" * (5 * 1024**2)  # 10 MiB
-        mock_vagrant.ssh.return_value = {
-            "returncode": 0,
-            "stdout": stdout,
-            "stderr": stderr,
-        }
-
-        result = await env.exec(["cat", "big"])
-
-        assert result.stdout == stdout
-        assert result.stderr == stderr
+        assert exc_info.value.truncated_output == (
+            "outbash: line 1: /etc/passwd: Permission denied"
+        )
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -1600,6 +1564,7 @@ class TestTimeoutHandling:
             command=EXEC_PREFIX + "/usr/bin/timeout -k 5s 120s ls -la",
             input=None,
             timeout=150,
+            output_limit=SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE,
         )
 
     @pytest.mark.unit
@@ -1802,6 +1767,121 @@ class TestTimeoutHandling:
                 await vagrant._run_vagrant_command_async(["status"], timeout=-5)
 
             assert "timeout must be positive" in str(exc_info.value)
+
+
+class TestOutputLimits:
+    """Guest output held in host memory is bounded by Inspect's sandbox limits."""
+
+    @pytest.fixture
+    def env(self, tmp_path, mock_sandbox_dir):
+        """A sandbox whose `vagrant ssh --command CMD` runs CMD in a real bash.
+
+        Like vagrant, which runs ssh as a child process, the stand-in forks
+        the shell rather than exec'ing it, so the command outlives a kill of
+        the process that `_run_vagrant_command_async` started.
+        """
+        vagrant = Vagrant(root=str(tmp_path))
+        vagrant._make_vagrant_command = lambda args: [
+            "sh",
+            "-c",
+            'bash -c "$1"; exit $?',
+            "sh",
+            args[-1],  # the command passed to `vagrant ssh --command`
+        ]
+        return VagrantSandboxEnvironment(mock_sandbox_dir, vagrant, "default")
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "cmd, marker_bytes",
+        [
+            (["yes"], 0),
+            # On stderr, the marker line exec() prints first counts too
+            (
+                ["sh", "-c", "yes >&2"],
+                len(f"{VagrantSandboxEnvironment.STDERR_MARKER}\n"),
+            ),
+        ],
+    )
+    async def test_exec_endless_output_raises(
+        self, env, monkeypatch, cmd, marker_bytes
+    ):
+        """Endless output on stdout or stderr is cut off at the limit."""
+        limit = 1024
+        monkeypatch.setattr(SandboxEnvironmentLimits, "MAX_EXEC_OUTPUT_SIZE", limit)
+
+        with pytest.raises(OutputLimitExceededError) as exc_info:
+            # Without the limit this never returns and host memory keeps growing.
+            await asyncio.wait_for(env.exec(cmd), timeout=3)
+
+        assert "10 MiB" in str(exc_info.value)
+        assert exc_info.value.truncated_output == "y\n" * ((limit - marker_bytes) // 2)
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_output_at_limit(self, env, monkeypatch):
+        """Output of exactly the limit is returned; one byte more raises."""
+        limit = 1024
+        monkeypatch.setattr(SandboxEnvironmentLimits, "MAX_EXEC_OUTPUT_SIZE", limit)
+
+        result = await env.exec(["sh", "-c", f"yes | head -c {limit}"])
+        assert result.stdout == "y\n" * (limit // 2)
+
+        with pytest.raises(OutputLimitExceededError) as exc_info:
+            await env.exec(["sh", "-c", f"yes | head -c {limit + 1}"])
+        assert exc_info.value.truncated_output == "y\n" * (limit // 2)
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_read_file_endless_file_raises(self, env, monkeypatch):
+        """Reading a file that never ends, and that stat sizes as 0, stops."""
+        monkeypatch.setattr(SandboxEnvironmentLimits, "MAX_READ_FILE_SIZE", 64 * 1024)
+
+        with pytest.raises(OutputLimitExceededError) as exc_info:
+            # Without the limit this never returns and host memory keeps growing.
+            await asyncio.wait_for(env.read_file("/dev/zero"), timeout=3)
+
+        assert "100 MiB" in str(exc_info.value)
+        assert exc_info.value.truncated_output is None
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bytes_under_limit", [0, 1, 2])
+    async def test_read_file_up_to_limit(
+        self, env, monkeypatch, tmp_path, bytes_under_limit
+    ):
+        """A file up to the limit is read in full, although its base64 is larger."""
+        limit = 1024 * 1024
+        monkeypatch.setattr(SandboxEnvironmentLimits, "MAX_READ_FILE_SIZE", limit)
+        contents = os.urandom(limit - bytes_under_limit)
+        (tmp_path / "file.bin").write_bytes(contents)
+
+        result = await env.read_file(str(tmp_path / "file.bin"), text=False)
+
+        assert result == contents
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_large_stdin_round_trips(self, env):
+        """Input larger than the pipe buffers is fed while output is read."""
+        data = "0123456789abcdef" * (256 * 1024)  # 4 MiB
+
+        result = await asyncio.wait_for(env.exec(["cat"], input=data), timeout=10)
+
+        assert result.returncode == 0
+        assert result.stdout == data
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_output_within_limit_unchanged(self, env):
+        """Output under the limit is returned as before."""
+        result = await env.exec(["sh", "-c", "echo out; echo err >&2; exit 3"])
+
+        assert (result.returncode, result.stdout, result.stderr) == (
+            3,
+            "out\n",
+            "err\n",
+        )
 
 
 class TestVagrantStartupThrottle:
