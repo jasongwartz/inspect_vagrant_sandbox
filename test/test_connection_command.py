@@ -132,15 +132,6 @@ async def test_connection_command_single_vm():
         assert "root" in output_lines(result)
         assert "vagrant" not in output_lines(result)
 
-        # vm_name=None: plain `vagrant ssh` must work in a single-VM env
-        unnamed = VagrantSandboxEnvironment(
-            sandbox.sandbox_dir, sandbox.vagrant, vm_name=None
-        )
-        connection = await unnamed.connection(user="root")
-        result = run_connection_command(connection.command, "whoami\n")
-        assert result.returncode == 0, result.stderr
-        assert "root" in output_lines(result)
-
         # Nonexistent user: fails loudly, never falls back to the ssh user
         connection = await sandbox.connection(user="nosuchuser")
         result = run_connection_command(connection.command, "whoami\n")
@@ -196,20 +187,6 @@ async def test_connection_command_multi_vm():
         assert result.returncode == 0, result.stderr
         assert "root" in output_lines(result)
         assert "target" in output_lines(result)
-
-        # vm_name=None in a multi-VM env: `vagrant ssh` without a machine
-        # name falls back to the machine marked `primary: true` in the
-        # Vagrantfile (attacker) — it does not land on an arbitrary VM.
-        # (Without a primary machine, vagrant refuses with a clear error.)
-        default = sandboxes["default"]
-        assert isinstance(default, VagrantSandboxEnvironment)
-        unnamed = VagrantSandboxEnvironment(
-            default.sandbox_dir, default.vagrant, vm_name=None
-        )
-        connection = await unnamed.connection()
-        result = run_connection_command(connection.command, "hostname\n")
-        assert result.returncode == 0, result.stderr
-        assert "attacker" in output_lines(result)
 
     finally:
         await VagrantSandboxEnvironment.sample_cleanup(

@@ -433,7 +433,7 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         self,
         sandbox_dir: SandboxDirectory,
         vagrant: Vagrant,
-        vm_name: str | None = None,
+        vm_name: str,
     ):
         self.vagrant = vagrant
         self.sandbox_dir = sandbox_dir
@@ -1100,9 +1100,8 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             # INSPECT_VM_SUFFIX, so vagrant must re-evaluate the Vagrantfile
             # with the same suffix or it won't find the created machine.
             command = f"INSPECT_VM_SUFFIX={shlex.quote(vm_suffix)} {command}"
-        if self.vm_name is not None:
-            # Without the VM name, `vagrant ssh` fails in a multi-VM environment
-            command = f"{command} {shlex.quote(self.vm_name)}"
+        # Without the VM name, `vagrant ssh` fails in a multi-VM environment
+        command = f"{command} {shlex.quote(self.vm_name)}"
         if user is not None:
             # `vagrant ssh` always logs in as the box's ssh user, so switch to
             # the requested user with a sudo login shell.
