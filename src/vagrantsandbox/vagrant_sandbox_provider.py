@@ -232,12 +232,24 @@ class Vagrant(BaseVagrant):
     async def get_vm_names(self) -> list[str]:
         """Get list of VM names defined in the Vagrantfile.
 
-        python-vagrant's ``status()`` returns a list of ``Status`` namedtuples
+        Parsed as python-vagrant's ``status()`` does: a list of ``Status`` namedtuples
         with fields ``(name, state, provider)`` - one per machine defined in
         the Vagrantfile, whether or not it has been created yet.
         """
-        # Use python-vagrant's built-in status method
-        status_info: list[Status] = await _run_in_executor(self.status)
+        # Not python-vagrant's status() itself: it sends vagrant's stderr to
+        # /dev/null, which is where vagrant says why a Vagrantfile didn't load.
+        result = await self._run_vagrant_command_async(["status", "--machine-readable"])
+        if result["returncode"] != 0:
+            error = subprocess.CalledProcessError(
+                result["returncode"], ["vagrant", "status", "--machine-readable"]
+            )
+            error.stdout = result["stdout"]
+            error.stderr = result["stderr"]
+            # Inspect reports this exception as the sample's error, so it must
+            # say why: on stderr if the Vagrantfile didn't load, else on stdout.
+            error.add_note((result["stdout"] + result["stderr"]).rstrip())
+            raise error
+        status_info: list[Status] = self._parse_status(result["stdout"])
         vm_names: list[str] = [vm.name for vm in status_info]
         self.logger.debug(f"get_vm_names status_info: {status_info}")
         self.logger.debug(f"get_vm_names extracted names: {vm_names}")
