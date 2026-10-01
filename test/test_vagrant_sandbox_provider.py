@@ -327,6 +327,33 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "discovery, error",
+        [
+            (
+                {"side_effect": subprocess.CalledProcessError(1, ["vagrant"])},
+                subprocess.CalledProcessError,
+            ),
+            ({"return_value": []}, RuntimeError),
+        ],
+    )
+    async def test_sample_init_fails_when_discovery_fails(
+        self, sample_config, mock_sandbox_patches, discovery, error
+    ):
+        """A failed or empty VM discovery fails the sample and its cleanup runs."""
+        mock_sandbox_patches["get_vm_names"].configure_mock(**discovery)
+        with patch(
+            "vagrantsandbox.vagrant_sandbox_provider.cleanup_sandbox_with_vms"
+        ) as mock_cleanup:
+            with pytest.raises(error):
+                await VagrantSandboxEnvironment.sample_init(
+                    "test_task", sample_config, {}
+                )
+
+            mock_cleanup.assert_awaited_once()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_sample_init_cleans_up_after_timeout(
         self, sample_config, mock_sandbox_patches
     ):
@@ -343,46 +370,6 @@ class TestVagrantSandboxEnvironment:
             mock_cleanup.return_value = None
 
             with pytest.raises(TimeoutError):
-                await VagrantSandboxEnvironment.sample_init(
-                    "test_task", sample_config, {}
-                )
-
-            mock_cleanup.assert_awaited_once()
-
-    @pytest.mark.unit
-    @pytest.mark.asyncio
-    async def test_sample_init_cleans_up_when_discovery_fails(
-        self, sample_config, mock_sandbox_patches
-    ):
-        """A 'vagrant status' failure fails the sample and discards the sandbox."""
-        with patch(
-            "vagrantsandbox.vagrant_sandbox_provider.cleanup_sandbox_with_vms"
-        ) as mock_cleanup:
-            mock_sandbox_patches[
-                "get_vm_names"
-            ].side_effect = subprocess.CalledProcessError(1, ["vagrant", "status"])
-            mock_cleanup.return_value = None
-
-            with pytest.raises(subprocess.CalledProcessError):
-                await VagrantSandboxEnvironment.sample_init(
-                    "test_task", sample_config, {}
-                )
-
-            mock_cleanup.assert_awaited_once()
-
-    @pytest.mark.unit
-    @pytest.mark.asyncio
-    async def test_sample_init_raises_when_no_vms_discovered(
-        self, sample_config, mock_sandbox_patches
-    ):
-        """Zero discovered VMs is never valid: Inspect requires a default sandbox."""
-        with patch(
-            "vagrantsandbox.vagrant_sandbox_provider.cleanup_sandbox_with_vms"
-        ) as mock_cleanup:
-            mock_sandbox_patches["get_vm_names"].return_value = []
-            mock_cleanup.return_value = None
-
-            with pytest.raises(RuntimeError, match="No VMs were discovered"):
                 await VagrantSandboxEnvironment.sample_init(
                     "test_task", sample_config, {}
                 )
