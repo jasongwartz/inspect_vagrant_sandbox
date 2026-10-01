@@ -70,7 +70,7 @@ async def test_vm_discovery_multi_with_suffix():
 
 @pytest.mark.asyncio
 async def test_vm_discovery_status_command_error():
-    """Test VM discovery falls back to [] when 'vagrant status' itself fails."""
+    """Test VM discovery raises when 'vagrant status' itself fails."""
     vagrant = Vagrant(root="/tmp")
 
     # Mock the status method to fail like a subprocess would
@@ -79,8 +79,8 @@ async def test_vm_discovery_status_command_error():
         "status",
         side_effect=subprocess.CalledProcessError(1, ["vagrant", "status"]),
     ):
-        vm_names = await vagrant.get_vm_names()
-        assert vm_names == []
+        with pytest.raises(subprocess.CalledProcessError):
+            await vagrant.get_vm_names()
 
 
 @pytest.mark.asyncio

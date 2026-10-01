@@ -57,7 +57,7 @@ def _get_max_vagrant_startups() -> int | None:
     return None
 
 
-def _startup_semaphore() -> AsyncContextManager[None]:
+def _startup_semaphore() -> AsyncContextManager[object]:
     """Limit concurrent vagrant up operations.
 
     Vagrant up is resource-intensive (disk I/O, CPU, memory allocation).
@@ -290,15 +290,8 @@ class Vagrant(BaseVagrant):
         with fields ``(name, state, provider)`` - one per machine defined in
         the Vagrantfile, whether or not it has been created yet.
         """
-        try:
-            # Use python-vagrant's built-in status method
-            status_info: list[Status] = await _run_in_executor(self.status)
-        except (subprocess.SubprocessError, OSError) as e:
-            self.logger.warning(
-                f"'vagrant status' failed while discovering VM names: {e}. "
-                "Falling back to single-VM mode."
-            )
-            return []
+        # Use python-vagrant's built-in status method
+        status_info: list[Status] = await _run_in_executor(self.status)
         vm_names: list[str] = [vm.name for vm in status_info]
         self.logger.debug(f"get_vm_names status_info: {status_info}")
         self.logger.debug(f"get_vm_names extracted names: {vm_names}")
@@ -506,7 +499,7 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         self,
         sandbox_dir: SandboxDirectory,
         vagrant: Vagrant,
-        vm_name: str | None = None,
+        vm_name: str,
     ):
         self.vagrant = vagrant
         self.sandbox_dir = sandbox_dir
@@ -573,21 +566,13 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
 
         vagrant = Vagrant(root=str(sandbox_dir), env=vagrant_env)
 
-        # Get available VMs before starting them
-        # list[str | None] because when no VMs are discovered, [None] is used
-        # below to mean "the default VM" (list is invariant, so a copy is
-        # needed to widen the element type).
-        vm_names: list[str | None] = list(await vagrant.get_vm_names())
-        cls.logger.debug(f"Discovered VMs in Vagrantfile: {vm_names}")
-
-        # If no VMs found, assume single-VM Vagrantfile
-        if not vm_names:
-            cls.logger.warning(
-                "No VMs discovered via 'vagrant status', assuming single-VM Vagrantfile"
-            )
-            vm_names = [None]  # None means default/single VM
-
         try:
+            # Get available VMs before starting them
+            vm_names = await vagrant.get_vm_names()
+            cls.logger.debug(f"Discovered VMs in Vagrantfile: {vm_names}")
+            if not vm_names:
+                raise RuntimeError(f"No VMs found in {config.vagrantfile_path}")
+
             # Start all VMs
             cls.logger.info(f"Starting VMs: {vm_names}")
             cls.logger.debug(f"Vagrant working directory: {sandbox_dir.path}")
@@ -691,19 +676,19 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         if primary_vm_base:
             # Find VM whose base name (suffix stripped) matches
             for vm_name in vm_names:
-                if vm_name and base_vm_name(vm_name) == primary_vm_base:
+                if base_vm_name(vm_name) == primary_vm_base:
                     primary_vm = vm_name
                     break
 
             if not primary_vm:
-                available_vms = [base_vm_name(vm) for vm in vm_names if vm is not None]
+                available_vms = [base_vm_name(vm) for vm in vm_names]
                 cls.logger.warning(
                     f"Primary VM '{primary_vm_base}' not found. "
                     f"Available VMs: {available_vms}. Using first available VM."
                 )
-                primary_vm = vm_names[0] if vm_names else None
+                primary_vm = vm_names[0]
         else:
-            primary_vm = vm_names[0] if vm_names else None
+            primary_vm = vm_names[0]
 
         # Create sandbox environments for each VM
         cls.logger.debug(f"Creating sandbox environments. Primary VM: {primary_vm}")
@@ -712,9 +697,7 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             env = VagrantSandboxEnvironment(sandbox_dir, vagrant, vm_name)
             cls.logger.debug(f"Created environment for VM: {vm_name}")
 
-            # Add by base VM name if it's not None (multi-VM case)
-            if vm_name is not None:
-                sandboxes[base_vm_name(vm_name)] = env
+            sandboxes[base_vm_name(vm_name)] = env
 
             if vm_name == primary_vm:
                 primary_env = env
@@ -769,15 +752,16 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         interrupted: bool,
     ) -> None:
         if not interrupted:
-            # Deduplicate environments - the same env may be added under multiple keys
-            # (e.g., "default" and the actual VM name)
-            seen_ids: set[int] = set()
+            # Deduplicate by sandbox directory - all VMs of a sample share one, and
+            # `vagrant destroy -f` in it destroys all of them. The same env may
+            # also be added under multiple keys (e.g., "default" and the VM name)
+            seen_paths: set[Path] = set()
             for env in environments.values():
                 if isinstance(env, VagrantSandboxEnvironment):
-                    env_id = id(env)
-                    if env_id in seen_ids:
+                    sandbox_path = env.sandbox_dir.path
+                    if sandbox_path in seen_paths:
                         continue
-                    seen_ids.add(env_id)
+                    seen_paths.add(sandbox_path)
 
                     if not env.sandbox_dir.path.exists():
                         cls.logger.warning(
@@ -887,10 +871,11 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         cmd: list[str],
         input: str | bytes | None = None,
         cwd: str | None = None,
-        env: dict[str, str] = {},
+        env: dict[str, str] | None = None,
         user: str | None = None,
         timeout: int | None = None,
         timeout_retry: bool = True,
+        concurrency: bool = True,
     ) -> ExecResult[str]:
         command = shlex.join(cmd)
         if timeout is not None:
@@ -1165,9 +1150,8 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             # INSPECT_VM_SUFFIX, so vagrant must re-evaluate the Vagrantfile
             # with the same suffix or it won't find the created machine.
             command = f"INSPECT_VM_SUFFIX={shlex.quote(vm_suffix)} {command}"
-        if self.vm_name is not None:
-            # Without the VM name, `vagrant ssh` fails in a multi-VM environment
-            command = f"{command} {shlex.quote(self.vm_name)}"
+        # Without the VM name, `vagrant ssh` fails in a multi-VM environment
+        command = f"{command} {shlex.quote(self.vm_name)}"
         if user is not None:
             # `vagrant ssh` always logs in as the box's ssh user, so switch to
             # the requested user with a sudo login shell.

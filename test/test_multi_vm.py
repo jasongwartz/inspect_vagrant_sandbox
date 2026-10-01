@@ -141,7 +141,7 @@ def test_multi_vm_config():
                 ModelOutput.for_tool_call(
                     model="mockllm/model",
                     tool_name="bash",
-                    tool_arguments={"cmd": "hostname"},
+                    tool_arguments={"command": "hostname"},
                 ),
                 ModelOutput.for_tool_call(
                     model="mockllm/model",
