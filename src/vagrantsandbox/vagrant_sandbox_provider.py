@@ -686,15 +686,16 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         interrupted: bool,
     ) -> None:
         if not interrupted:
-            # Deduplicate environments - the same env may be added under multiple keys
-            # (e.g., "default" and the actual VM name)
-            seen_ids: set[int] = set()
+            # Deduplicate by sandbox directory - all VMs of a sample share one, and
+            # `vagrant destroy -f` in it destroys all of them. The same env may
+            # also be added under multiple keys (e.g., "default" and the VM name)
+            seen_paths: set[Path] = set()
             for env in environments.values():
                 if isinstance(env, VagrantSandboxEnvironment):
-                    env_id = id(env)
-                    if env_id in seen_ids:
+                    sandbox_path = env.sandbox_dir.path
+                    if sandbox_path in seen_paths:
                         continue
-                    seen_ids.add(env_id)
+                    seen_paths.add(sandbox_path)
 
                     if not env.sandbox_dir.path.exists():
                         cls.logger.warning(
