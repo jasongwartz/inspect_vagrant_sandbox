@@ -7,8 +7,11 @@ run it to verify that its `SandboxEnvironment` implementation behaves the way
 Inspect expects (file read/write, exec output/stderr/returncode/timeout, cwd,
 env vars, exec-as-user, output limits, etc.).
 
-The suite reuses a single sandbox environment across all its checks, so we spin
-up one VM, run the whole suite against it, and assert that every check passes.
+The module defines each check as a `test_*` function taking a `sandbox_env`
+and lists them all in its `__all__`. Inspect's own runner collects them as
+separate pytest tests, but CI boots a VM for every collected `vm_required` test,
+so instead we spin up one VM, run every check in `__all__` against it in turn
+(they clean up after themselves), and assert that every check passes.
 
 Run with:
     pytest test/test_self_check.py -v -s -m vm_required
@@ -18,7 +21,7 @@ import os
 
 import pytest
 from inspect_ai.util import SandboxEnvironment
-from inspect_ai.util._sandbox.self_check import self_check
+from inspect_ai.util._sandbox import self_check
 
 from vagrantsandbox.vagrant_sandbox_provider import (
     VagrantSandboxEnvironment,
@@ -35,6 +38,11 @@ def get_basic_vagrantfile() -> str:
 @pytest.mark.asyncio
 async def test_self_check() -> None:
     """Bring up a VM and run Inspect's core sandbox conformance suite against it."""
+    checks = [getattr(self_check, name) for name in self_check.__all__]
+    # 44 checks as of inspect-ai 0.3.268: fail loudly rather than pass vacuously
+    # if a change upstream stops `__all__` from listing them.
+    assert len(checks) >= 40, f"only {len(checks)} self_check checks found"
+
     sandboxes = await VagrantSandboxEnvironment.sample_init(
         "self_check",
         VagrantSandboxEnvironmentConfig(vagrantfile_path=get_basic_vagrantfile()),
@@ -43,8 +51,16 @@ async def test_self_check() -> None:
     sandbox: SandboxEnvironment = sandboxes["default"]
     assert isinstance(sandbox, VagrantSandboxEnvironment)
 
+    results: dict[str, bool | str] = {}
     try:
-        results = await self_check(sandbox)
+        for check in checks:
+            try:
+                await check(sandbox_env=sandbox)
+                results[check.__name__] = True
+            except AssertionError as e:
+                results[check.__name__] = f"FAILED: [{e}]"
+            except Exception as e:
+                results[check.__name__] = f"ERROR: [{e!r}]"
     finally:
         await VagrantSandboxEnvironment.sample_cleanup(
             "self_check",

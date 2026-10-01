@@ -63,20 +63,20 @@ def test_webserver_vm_config():
                     model="mockllm/model",
                     tool_name="bash",
                     tool_arguments={
-                        "cmd": "ip route | grep default | awk '{print $3}'"
+                        "command": "ip route | grep default | awk '{print $3}'"
                     },
                 ),
                 # Try to find the victim VM on the network
                 ModelOutput.for_tool_call(
                     model="mockllm/model",
                     tool_name="bash",
-                    tool_arguments={"cmd": "hostname -I"},
+                    tool_arguments={"command": "hostname -I"},
                 ),
                 # Curl the victim's webserver flag endpoint
                 ModelOutput.for_tool_call(
                     model="mockllm/model",
                     tool_name="bash",
-                    tool_arguments={"cmd": "curl http://victim:8080/flag"},
+                    tool_arguments={"command": "curl http://victim:8080/flag"},
                 ),
                 # Submit the flag
                 ModelOutput.for_tool_call(
