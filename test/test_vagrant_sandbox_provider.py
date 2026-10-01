@@ -369,6 +369,36 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_sample_cleanup_multi_vm(self, tmp_path, mock_vagrant, caplog):
+        """The VMs of a sample share one sandbox directory: clean it up once."""
+        caplog.set_level("WARNING", logger="vagrantsandbox")
+        sandbox_dir = SandboxDirectory(tmp_path / "sample01-abc123")
+        sandbox_dir.path.mkdir()
+        mock_vagrant._run_vagrant_command_async = AsyncMock(
+            return_value={"returncode": 0, "stdout": "", "stderr": ""}
+        )
+
+        # As sample_init returns them: one environment per VM, plus "default"
+        target = VagrantSandboxEnvironment(sandbox_dir, mock_vagrant, "target")
+        attacker = VagrantSandboxEnvironment(sandbox_dir, mock_vagrant, "attacker")
+        environments = {"default": target, "target": target, "attacker": attacker}
+
+        with patch.object(
+            sandbox_dir, "cleanup", wraps=sandbox_dir.cleanup
+        ) as mock_cleanup:
+            await VagrantSandboxEnvironment.sample_cleanup(
+                "test_task", None, environments, interrupted=False
+            )
+
+        mock_vagrant._run_vagrant_command_async.assert_called_once_with(
+            ["destroy", "-f"]
+        )
+        mock_cleanup.assert_awaited_once()
+        assert not sandbox_dir.path.exists()
+        assert caplog.messages == []
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_sample_cleanup_keeps_directory_when_destroy_fails(
         self, mock_vagrant, mock_sandbox_dir, mock_subprocess_patches
     ):
