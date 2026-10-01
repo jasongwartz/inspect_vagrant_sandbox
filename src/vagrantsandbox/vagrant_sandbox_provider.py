@@ -433,7 +433,7 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         self,
         sandbox_dir: SandboxDirectory,
         vagrant: Vagrant,
-        vm_name: str | None = None,
+        vm_name: str,
     ):
         self.vagrant = vagrant
         self.sandbox_dir = sandbox_dir
@@ -610,19 +610,19 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         if primary_vm_base:
             # Find VM whose base name (suffix stripped) matches
             for vm_name in vm_names:
-                if vm_name and base_vm_name(vm_name) == primary_vm_base:
+                if base_vm_name(vm_name) == primary_vm_base:
                     primary_vm = vm_name
                     break
 
             if not primary_vm:
-                available_vms = [base_vm_name(vm) for vm in vm_names if vm is not None]
+                available_vms = [base_vm_name(vm) for vm in vm_names]
                 cls.logger.warning(
                     f"Primary VM '{primary_vm_base}' not found. "
                     f"Available VMs: {available_vms}. Using first available VM."
                 )
-                primary_vm = vm_names[0] if vm_names else None
+                primary_vm = vm_names[0]
         else:
-            primary_vm = vm_names[0] if vm_names else None
+            primary_vm = vm_names[0]
 
         # Create sandbox environments for each VM
         cls.logger.debug(f"Creating sandbox environments. Primary VM: {primary_vm}")
@@ -631,9 +631,7 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             env = VagrantSandboxEnvironment(sandbox_dir, vagrant, vm_name)
             cls.logger.debug(f"Created environment for VM: {vm_name}")
 
-            # Add by base VM name if it's not None (multi-VM case)
-            if vm_name is not None:
-                sandboxes[base_vm_name(vm_name)] = env
+            sandboxes[base_vm_name(vm_name)] = env
 
             if vm_name == primary_vm:
                 primary_env = env
@@ -1097,9 +1095,8 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             # INSPECT_VM_SUFFIX, so vagrant must re-evaluate the Vagrantfile
             # with the same suffix or it won't find the created machine.
             command = f"INSPECT_VM_SUFFIX={shlex.quote(vm_suffix)} {command}"
-        if self.vm_name is not None:
-            # Without the VM name, `vagrant ssh` fails in a multi-VM environment
-            command = f"{command} {shlex.quote(self.vm_name)}"
+        # Without the VM name, `vagrant ssh` fails in a multi-VM environment
+        command = f"{command} {shlex.quote(self.vm_name)}"
         if user is not None:
             # `vagrant ssh` always logs in as the box's ssh user, so switch to
             # the requested user with a sudo login shell.
