@@ -104,11 +104,17 @@ def mock_sandbox_patches():
             return_value=mock_sandbox,
         ) as mock_create,
         patch("asyncio.to_thread", new_callable=AsyncMock) as mock_to_thread,
+        patch(
+            "vagrantsandbox.vagrant_sandbox_provider.Vagrant.get_vm_names",
+            new_callable=AsyncMock,
+            return_value=["default"],
+        ) as mock_get_vm_names,
     ):
         yield {
             "create": mock_create,
             "to_thread": mock_to_thread,
             "sandbox": mock_sandbox,
+            "get_vm_names": mock_get_vm_names,
         }
 
 
@@ -337,6 +343,46 @@ class TestVagrantSandboxEnvironment:
             mock_cleanup.return_value = None
 
             with pytest.raises(TimeoutError):
+                await VagrantSandboxEnvironment.sample_init(
+                    "test_task", sample_config, {}
+                )
+
+            mock_cleanup.assert_awaited_once()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_sample_init_cleans_up_when_discovery_fails(
+        self, sample_config, mock_sandbox_patches
+    ):
+        """A 'vagrant status' failure fails the sample and discards the sandbox."""
+        with patch(
+            "vagrantsandbox.vagrant_sandbox_provider.cleanup_sandbox_with_vms"
+        ) as mock_cleanup:
+            mock_sandbox_patches[
+                "get_vm_names"
+            ].side_effect = subprocess.CalledProcessError(1, ["vagrant", "status"])
+            mock_cleanup.return_value = None
+
+            with pytest.raises(subprocess.CalledProcessError):
+                await VagrantSandboxEnvironment.sample_init(
+                    "test_task", sample_config, {}
+                )
+
+            mock_cleanup.assert_awaited_once()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_sample_init_raises_when_no_vms_discovered(
+        self, sample_config, mock_sandbox_patches
+    ):
+        """Zero discovered VMs is never valid: Inspect requires a default sandbox."""
+        with patch(
+            "vagrantsandbox.vagrant_sandbox_provider.cleanup_sandbox_with_vms"
+        ) as mock_cleanup:
+            mock_sandbox_patches["get_vm_names"].return_value = []
+            mock_cleanup.return_value = None
+
+            with pytest.raises(RuntimeError, match="No VMs were discovered"):
                 await VagrantSandboxEnvironment.sample_init(
                     "test_task", sample_config, {}
                 )
