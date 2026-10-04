@@ -70,17 +70,20 @@ async def test_vm_discovery_multi_with_suffix():
 
 @pytest.mark.asyncio
 async def test_vm_discovery_status_command_error():
-    """Test VM discovery raises when 'vagrant status' itself fails."""
+    """Test VM discovery raises, saying why, when 'vagrant status' itself fails."""
     vagrant = Vagrant(root="/tmp")
 
-    # Mock the status method to fail like a subprocess would
+    # Fail like vagrant: why the Vagrantfile didn't load on stderr, else on stdout
     with patch.object(
         vagrant,
-        "status",
-        side_effect=subprocess.CalledProcessError(1, ["vagrant", "status"]),
+        "_make_vagrant_command",
+        return_value=["sh", "-c", "echo no provider; echo bad Vagrantfile >&2; exit 1"],
     ):
-        with pytest.raises(subprocess.CalledProcessError):
+        with pytest.raises(subprocess.CalledProcessError) as exc_info:
             await vagrant.get_vm_names()
+
+    # Inspect reports the sample's error with its traceback, notes included
+    assert exc_info.value.__notes__ == ["no provider\nbad Vagrantfile\n"]
 
 
 @pytest.mark.asyncio
