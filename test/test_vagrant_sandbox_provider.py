@@ -8,7 +8,11 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from pathlib import Path
-from inspect_ai.util import OutputLimitExceededError, SandboxEnvironmentLimits
+from inspect_ai.util import (
+    OutputLimitExceededError,
+    SandboxEnvironment,
+    SandboxEnvironmentLimits,
+)
 from inspect_ai.util._concurrency import init_concurrency
 
 from vagrantsandbox.vagrant_sandbox_provider import (
@@ -253,6 +257,14 @@ class TestVagrantSandboxEnvironment:
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         assert env.vagrant == mock_vagrant
         assert env.sandbox_dir == mock_sandbox_dir
+
+    @pytest.mark.unit
+    def test_init_calls_base_init(self, mock_sandbox_dir, mock_vagrant):
+        """SandboxEnvironment.__init__ sets up the state Inspect's sandbox tools
+        keep on each sandbox (exec_remote() reads self._tools_injected)."""
+        with patch.object(SandboxEnvironment, "__init__") as base_init:
+            VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
+        base_init.assert_called_once_with()
 
     @pytest.mark.unit
     @pytest.mark.asyncio

@@ -452,6 +452,9 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         vagrant: Vagrant,
         vm_name: str,
     ):
+        # Inspect's base __init__ sets up the state exec_remote() and sandbox
+        # tools keep on each sandbox object (reached through as_type()).
+        super().__init__()
         self.vagrant = vagrant
         self.sandbox_dir = sandbox_dir
         self.vm_name = vm_name
