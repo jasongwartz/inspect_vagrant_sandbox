@@ -50,9 +50,7 @@ try:
 except ImportError:  # inspect_ai < 0.3.260
 
     class SandboxUnavailableError(RuntimeError):  # type: ignore[no-redef]
-        """Stand-in for inspect_ai's: exec() raises it when `vagrant ssh` fails
-        before the command runs. Older Inspect has no tool error for it, so it
-        fails the sample like any other unexpected error."""
+        """Stand-in for inspect_ai's; it fails the sample like any other error."""
 
 
 def _get_max_vagrant_startups() -> int | None:
@@ -909,16 +907,12 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                 result["returncode"] != 0
                 and f"{self.STDERR_MARKER}\n" not in result["stderr"]
             ):
-                # No marker: `vagrant ssh` failed before the command ran (the VM
-                # isn't running, ssh was refused, ...), so what it printed isn't
-                # the command's output. Inspect shows the model a
-                # sandbox_unavailable tool error instead. vagrant runs ssh with
-                # LogLevel=FATAL, so ssh's own errors are usually missing.
-                stderr = result["stderr"].strip()
+                # No marker: vagrant ssh failed before the command ran, so its
+                # output isn't the command's (often empty: vagrant's ssh LogLevel=FATAL)
                 raise SandboxUnavailableError(
-                    "The sandbox is unavailable: vagrant ssh exited "
-                    f"{result['returncode']} before running the command"
-                    + (f": {stderr}" if stderr else " and printed nothing")
+                    "vagrant ssh failed before running the command (exit status "
+                    f"{result['returncode']}): "
+                    f"{result['stderr'].strip() or 'no output'}"
                 )
 
             exec_result = ExecResult(
