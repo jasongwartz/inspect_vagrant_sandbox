@@ -156,6 +156,13 @@ def test_multi_vm_config():
     assert len(eval_logs) == 1
     assert eval_logs[0]
     assert eval_logs[0].error is None
+    assert eval_logs[0].samples
+    sample = eval_logs[0].samples[0]
+    tool_calls = [x for x in sample.messages if x.role == "tool"]
+    # `hostname` must have run on the primary (attacker) VM, and nothing
+    # vagrant itself printed to stderr (under libvirt, fog's "[fog][WARNING]
+    # Unrecognized arguments" line) may leak into the tool output with it
+    assert tool_calls[0].text.strip() == "attacker"
 
 
 if __name__ == "__main__":
