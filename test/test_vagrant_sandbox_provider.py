@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from pathlib import Path
+import inspect_ai.util
 from inspect_ai.util import OutputLimitExceededError, SandboxEnvironmentLimits
 from inspect_ai.util._concurrency import init_concurrency
 
@@ -16,6 +17,7 @@ from vagrantsandbox.vagrant_sandbox_provider import (
     VagrantSandboxEnvironment,
     VagrantSandboxEnvironmentConfig,
     SandboxDirectory,
+    SandboxUnavailableError,
     SandboxUnrecoverableError,
     TimeoutConfig,
     _run_in_executor,
@@ -493,7 +495,7 @@ class TestVagrantSandboxEnvironment:
         mock_vagrant.ssh.return_value = {
             "returncode": 1,
             "stdout": "",
-            "stderr": "command failed",
+            "stderr": f"{VagrantSandboxEnvironment.STDERR_MARKER}\ncommand failed",
         }
 
         result = await env.exec(["false"])
@@ -523,21 +525,65 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_exec_keeps_stderr_without_marker(
+    @pytest.mark.parametrize(
+        "returncode,ssh_stderr,match",
+        [
+            # vagrant's own error, e.g. the VM was halted
+            (
+                1,
+                "VM must be running to open SSH connection. Run `vagrant up`\n"
+                "to start the virtual machine.\n",
+                "exited 1 .*: VM must be running",
+            ),
+            # ssh's: it was refused, but vagrant runs ssh with LogLevel=FATAL
+            (255, "", "exited 255 .* and printed nothing"),
+        ],
+    )
+    async def test_exec_raises_sandbox_unavailable_without_marker(
+        self, mock_vagrant, mock_sandbox_dir, returncode, ssh_stderr, match
+    ):
+        """If vagrant ssh failed before the command ran, its output isn't the
+        command's: exec() raises SandboxUnavailableError naming the exit status
+        and error."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
+        mock_vagrant.ssh.return_value = {
+            "returncode": returncode,
+            "stdout": "",
+            "stderr": ssh_stderr,
+        }
+
+        with pytest.raises(SandboxUnavailableError, match=match):
+            await env.exec(["ls"])
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_returns_failure_after_marker(
         self, mock_vagrant, mock_sandbox_dir
     ):
-        """If ssh failed before the command ran, all of stderr is returned."""
+        """The same exit status and error from the command itself are its result."""
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
-        ssh_error = "ssh: connect to host 192.168.121.5 port 22: Connection refused\n"
+        ssh_error = "ssh: connect to host example port 22: Connection refused\n"
         mock_vagrant.ssh.return_value = {
             "returncode": 255,
             "stdout": "",
-            "stderr": ssh_error,
+            "stderr": f"{VagrantSandboxEnvironment.STDERR_MARKER}\n{ssh_error}",
         }
 
-        result = await env.exec(["ls"])
+        result = await env.exec(["ssh", "example"])
 
+        assert result.returncode == 255
         assert result.stderr == ssh_error
+
+    @pytest.mark.unit
+    @pytest.mark.skipif(
+        not hasattr(inspect_ai.util, "SandboxUnavailableError"),
+        reason="inspect_ai < 0.3.260 has no SandboxUnavailableError",
+    )
+    def test_sandbox_unavailable_error_is_inspects(self):
+        """Where Inspect has the class, exec() raises that one, which the tool
+        layer reports as a sandbox_unavailable error instead of failing the
+        sample."""
+        assert SandboxUnavailableError is inspect_ai.util.SandboxUnavailableError
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -820,7 +866,8 @@ class TestVagrantSandboxEnvironment:
         mock_vagrant.ssh.return_value = {
             "returncode": 126,
             "stdout": "",
-            "stderr": "sh: 1: /etc/passwd: Permission denied",
+            "stderr": f"{VagrantSandboxEnvironment.STDERR_MARKER}\n"
+            "sh: 1: /etc/passwd: Permission denied",
         }
 
         with pytest.raises(PermissionError):
@@ -878,7 +925,8 @@ class TestVagrantSandboxEnvironment:
         mock_vagrant.ssh.return_value = {
             "returncode": 126,
             "stdout": "",
-            "stderr": "bash: line 1: /etc/passwd: Permission denied\n",
+            "stderr": f"{VagrantSandboxEnvironment.STDERR_MARKER}\n"
+            "bash: line 1: /etc/passwd: Permission denied\n",
         }
 
         with pytest.raises(PermissionError) as exc_info:
@@ -912,7 +960,7 @@ class TestVagrantSandboxEnvironment:
         mock_vagrant.ssh.return_value = {
             "returncode": 1,
             "stdout": "out",
-            "stderr": "<" + "x" * limit + ">",
+            "stderr": f"{VagrantSandboxEnvironment.STDERR_MARKER}\n<{'x' * limit}>",
         }
 
         with pytest.raises(OutputLimitExceededError) as exc_info:
@@ -1655,7 +1703,7 @@ class TestTimeoutHandling:
         mock_vagrant.ssh.return_value = {
             "returncode": returncode,
             "stdout": "",
-            "stderr": "",
+            "stderr": f"{VagrantSandboxEnvironment.STDERR_MARKER}\n",
         }
 
         with patch("vagrantsandbox.vagrant_sandbox_provider.time") as mock_time:

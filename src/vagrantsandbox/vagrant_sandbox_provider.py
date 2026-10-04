@@ -43,6 +43,17 @@ from platformdirs import user_cache_dir
 from pydantic import BaseModel, Field, field_validator
 from vagrant import Status, Vagrant as BaseVagrant
 
+try:
+    from inspect_ai.util import (  # type: ignore[attr-defined, unused-ignore]
+        SandboxUnavailableError,
+    )
+except ImportError:  # inspect_ai < 0.3.260
+
+    class SandboxUnavailableError(RuntimeError):  # type: ignore[no-redef]
+        """Stand-in for inspect_ai's: exec() raises it when `vagrant ssh` fails
+        before the command runs. Older Inspect has no tool error for it, so it
+        fails the sample like any other unexpected error."""
+
 
 def _get_max_vagrant_startups() -> int | None:
     """Get the maximum number of concurrent vagrant up operations.
@@ -894,6 +905,21 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                 timeout=None if timeout is None else timeout + 30,
             )
             elapsed = time.monotonic() - start
+            if (
+                result["returncode"] != 0
+                and f"{self.STDERR_MARKER}\n" not in result["stderr"]
+            ):
+                # No marker: `vagrant ssh` failed before the command ran (the VM
+                # isn't running, ssh was refused, ...), so what it printed isn't
+                # the command's output. Inspect shows the model a
+                # sandbox_unavailable tool error instead. vagrant runs ssh with
+                # LogLevel=FATAL, so ssh's own errors are usually missing.
+                stderr = result["stderr"].strip()
+                raise SandboxUnavailableError(
+                    "The sandbox is unavailable: vagrant ssh exited "
+                    f"{result['returncode']} before running the command"
+                    + (f": {stderr}" if stderr else " and printed nothing")
+                )
 
             exec_result = ExecResult(
                 success=result["returncode"] == 0,
