@@ -23,8 +23,7 @@ from vagrantsandbox.vagrant_sandbox_provider import (
     _startup_semaphore,
 )
 
-# exec() sets an EXIT trap and prints a marker to the guest's stderr before
-# running the command.
+# exec() sets an EXIT trap and prints a stderr marker before the command.
 EXEC_PREFIX = f"trap : EXIT; echo {VagrantSandboxEnvironment.STDERR_MARKER} >&2; "
 
 

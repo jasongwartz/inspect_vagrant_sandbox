@@ -885,13 +885,9 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             start = time.monotonic()
             result = await self.vagrant.ssh(
                 vm_name=self.vm_name,
-                # The EXIT trap stops bash exec'ing the command, which it does
-                # with the last command of vagrant's `bash -l -c` when no trap
-                # is set. A command killed by a signal would then take the ssh
-                # session with it, and ssh exits 255 instead of the shell's
-                # 128+N: e.g. 255, not 137, for a command that ignored SIGTERM
-                # and that `timeout` SIGKILLed, so no TimeoutError. Unlike
-                # `; exit $?`, the trap doesn't make bash run ~/.bash_logout.
+                # The EXIT trap stops bash exec'ing the last command of
+                # vagrant's `bash -l -c`: killed by a signal, it then exits
+                # 128+N (e.g. 137, so TimeoutError) instead of ssh's 255.
                 command=f"trap : EXIT; echo {self.STDERR_MARKER} >&2; {ssh_command}",
                 input=ssh_input,
                 # Only a fallback for a hung vagrant or ssh: the guest's timeout
