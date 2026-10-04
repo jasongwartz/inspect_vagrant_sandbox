@@ -828,6 +828,10 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         timeout_retry: bool = True,
         concurrency: bool = True,
     ) -> ExecResult[str]:
+        # timeout_retry and concurrency are advisory and ignored: the guest's
+        # timeout is final and retrying the host-side fallback below could run a
+        # command twice; default_concurrency() already caps the VMs, hence the
+        # `vagrant ssh` processes, and a slot would sit idle under long commands.
         command = shlex.join(cmd)
         if timeout is not None:
             # `timeout 0s` would mean no timeout at all
