@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import errno
+import math
 import os
 import re
 import shlex
@@ -18,6 +19,7 @@ from typing import (
     Coroutine,
     Final,
     Literal,
+    NotRequired,
     TypedDict,
     TypeVar,
     assert_never,
@@ -224,6 +226,58 @@ class ExecCommandReturn(TypedDict):
     returncode: int
     stdout: str
     stderr: str
+    # True if stdout or stderr exceeded the output_limit: the command was
+    # stopped early and each stream is cut to output_limit bytes.
+    truncated: NotRequired[bool]
+
+
+async def _communicate_with_limit(
+    process: asyncio.subprocess.Process, input: bytes | None, limit: int | None
+) -> tuple[bytes, bytes, bool]:
+    """Like process.communicate(), but stop once stdout or stderr exceeds
+    `limit` bytes, so the host never buffers more than that.
+
+    Returns (stdout, stderr, truncated).
+    """
+    if limit is None:
+        stdout, stderr = await process.communicate(input)
+        return stdout, stderr, False
+
+    truncated = False
+
+    async def feed_stdin() -> None:
+        if process.stdin is None:
+            return
+        try:
+            if input:
+                process.stdin.write(input)
+            await process.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        process.stdin.close()
+
+    async def read(stream: asyncio.StreamReader | None) -> bytes:
+        nonlocal truncated
+        assert stream is not None
+        output = bytearray()
+        while chunk := await stream.read(65536):
+            output += chunk
+            if len(output) > limit:
+                del output[limit:]
+                truncated = True
+                # Kill vagrant and close our ends of its pipes. The ssh process
+                # vagrant spawned inherits the pipes and outlives the kill, but
+                # its next write then fails (EPIPE), which ends it and the guest
+                # command, as in `ssh host yes | head`.
+                process._transport.close()  # type: ignore[attr-defined]
+                break
+        return bytes(output)
+
+    _, stdout, stderr = await asyncio.gather(
+        feed_stdin(), read(process.stdout), read(process.stderr)
+    )
+    await process.wait()
+    return stdout, stderr, truncated
 
 
 class Vagrant(BaseVagrant):
@@ -248,6 +302,7 @@ class Vagrant(BaseVagrant):
         args: list[str | None],
         input: str | bytes | None = None,
         timeout: int | float | TimeoutConfig | None = None,
+        output_limit: int | None = None,
     ) -> ExecCommandReturn:
         """
         Run a vagrant command and return everything, not just stdout.
@@ -258,6 +313,9 @@ class Vagrant(BaseVagrant):
         input: Optional input to pass to stdin.
         timeout: Optional timeout - can be a number (seconds) or TimeoutConfig
             for fine-grained control over grace periods.
+        output_limit: Optional limit in bytes on each of stdout and stderr.
+            If one is exceeded, the command is stopped and the result has
+            truncated=True.
         """
         # Extract timeout configuration
         timeout_val: float | None
@@ -292,17 +350,19 @@ class Vagrant(BaseVagrant):
         )
 
         try:
-            communicate_coro = process.communicate(
-                input=input.encode("utf-8") if isinstance(input, str) else input
+            communicate_coro = _communicate_with_limit(
+                process,
+                input.encode("utf-8") if isinstance(input, str) else input,
+                output_limit,
             )
             if timeout_val is not None:
                 if timeout_val <= 0:
                     raise ValueError(f"timeout must be positive, got {timeout_val}")
-                stdout, stderr = await asyncio.wait_for(
+                stdout, stderr, truncated = await asyncio.wait_for(
                     communicate_coro, timeout=float(timeout_val)
                 )
             else:
-                stdout, stderr = await communicate_coro
+                stdout, stderr, truncated = await communicate_coro
         except asyncio.TimeoutError:
             # Try graceful termination first
             process.terminate()
@@ -330,14 +390,16 @@ class Vagrant(BaseVagrant):
             "returncode should be set after communicate()"
         )
 
-        # Decode bytes to string
-        stdout_str = stdout.decode("utf-8") if stdout else ""
-        stderr_str = stderr.decode("utf-8") if stderr else ""
+        # Decode bytes to string (truncated output may end mid-character)
+        errors = "replace" if truncated else "strict"
+        stdout_str = stdout.decode("utf-8", errors) if stdout else ""
+        stderr_str = stderr.decode("utf-8", errors) if stderr else ""
 
         return {
             "stdout": stdout_str,
             "stderr": stderr_str,
             "returncode": process.returncode,
+            "truncated": truncated,
         }
 
     @override
@@ -348,6 +410,7 @@ class Vagrant(BaseVagrant):
         extra_ssh_args: str | None = None,
         input: str | bytes | None = None,
         timeout: int | float | TimeoutConfig | None = None,
+        output_limit: int | None = None,
     ) -> Coroutine[Any, Any, ExecCommandReturn]:
         """
         Execute a command via ssh on the vm specified.
@@ -356,13 +419,16 @@ class Vagrant(BaseVagrant):
         extra_ssh_args: Corresponds to '--' option in the vagrant ssh command
         input: Optional input to pass to stdin of the command.
         timeout: Optional timeout - can be a number (seconds) or TimeoutConfig.
+        output_limit: Optional limit in bytes on each of stdout and stderr.
         Returns the output of running the command.
         """
         cmd = ["ssh", vm_name, "--no-tty", "--command", command]
         if extra_ssh_args is not None:
             cmd += ["--", extra_ssh_args]
 
-        return self._run_vagrant_command_async(cmd, input=input, timeout=timeout)
+        return self._run_vagrant_command_async(
+            cmd, input=input, timeout=timeout, output_limit=output_limit
+        )
 
 
 T = TypeVar("T")
@@ -875,8 +941,18 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                 # vagrant takes several seconds (more under load) to load the
                 # Vagrantfile, look up the VM and connect before it starts.
                 timeout=None if timeout is None else timeout + 30,
+                output_limit=SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE,
             )
             elapsed = time.monotonic() - start
+            if result.get("truncated"):
+                # Checked first: the PermissionError check below can't trust a
+                # cut-off stderr
+                raise OutputLimitExceededError(
+                    limit_str=SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE_STR,
+                    truncated_output=(
+                        f"{result['stdout']}{self._guest_stderr(result['stderr'])}"
+                    ),
+                )
 
             exec_result = ExecResult(
                 success=result["returncode"] == 0,
@@ -913,7 +989,6 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                 )
             ):
                 raise PermissionError(errno.EACCES, "Permission denied", cmd[0])
-            self._verify_exec_output_size(exec_result)
             return exec_result
 
     def _guest_stderr(self, stderr: str) -> str:
@@ -934,40 +1009,6 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         # non-compliant box fail fast ("sudo: a password is required" on
         # stderr) instead of hanging on a password prompt.
         return f"sudo -H -n -u {shlex.quote(user)} sh -c {shlex.quote(command)}"
-
-    # _verify_exec_output_size() and _truncate_middle() are a port of
-    # inspect_ai 0.3.123's private verify_exec_result_size() and
-    # truncate_string_to_bytes(), which can't be imported: 0.3.183 removed the
-    # former. From 0.3.183 on, Inspect runs this check itself for every
-    # provider, so these can go once we require inspect_ai >= 0.3.183.
-
-    @classmethod
-    def _verify_exec_output_size(cls, exec_result: ExecResult[str]) -> None:
-        """Raise OutputLimitExceededError if stdout or stderr is over Inspect's limit."""
-        limit = SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE
-        truncated_stdout = cls._truncate_middle(exec_result.stdout, limit)
-        truncated_stderr = cls._truncate_middle(exec_result.stderr, limit)
-        if truncated_stdout is None and truncated_stderr is None:
-            return
-        stdout = exec_result.stdout if truncated_stdout is None else truncated_stdout
-        stderr = exec_result.stderr if truncated_stderr is None else truncated_stderr
-        raise OutputLimitExceededError(
-            limit_str=SandboxEnvironmentLimits.MAX_EXEC_OUTPUT_SIZE_STR,
-            truncated_output=f"{stdout}{stderr}",
-        )
-
-    @staticmethod
-    def _truncate_middle(text: str, max_bytes: int) -> str | None:
-        """Cut text to max_bytes of UTF-8, keeping its start and end.
-
-        Returns None if text already fits.
-        """
-        encoded = text.encode("utf-8", errors="replace")
-        if len(encoded) <= max_bytes:
-            return None
-        start = encoded[: max_bytes // 2]
-        end = encoded[len(encoded) - (max_bytes - len(start)) :]
-        return (start + end).decode("utf-8", errors="replace")
 
     @staticmethod
     def _raise_file_error(
@@ -1041,9 +1082,23 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             f"base64 -- {quoted_file} && "
             f"echo {self.READ_FILE_END_MARKER}"
         )
+        # Stop reading once the output is more than a file within the limit
+        # can produce, so that a file that never ends but that `stat` sizes as
+        # 0 (/dev/zero) can't fill host memory. That is the file's base64 (4
+        # bytes per 3, and a newline after each 76-character line), plus 4 KiB
+        # for the two marker lines and anything the guest's login shell prints.
+        base64_size = 4 * math.ceil(size_limit / 3)
+        output_limit = base64_size + math.ceil(base64_size / 76) + 4096
         result = await self.vagrant.ssh(
-            vm_name=self.vm_name, command=f"echo {self.STDERR_MARKER} >&2; {command}"
+            vm_name=self.vm_name,
+            command=f"echo {self.STDERR_MARKER} >&2; {command}",
+            output_limit=output_limit,
         )
+        if result.get("truncated"):
+            raise OutputLimitExceededError(
+                limit_str=SandboxEnvironmentLimits.MAX_READ_FILE_SIZE_STR,
+                truncated_output=None,
+            )
         if result["returncode"] != 0:
             if limit_marker in result["stderr"]:
                 raise OutputLimitExceededError(
