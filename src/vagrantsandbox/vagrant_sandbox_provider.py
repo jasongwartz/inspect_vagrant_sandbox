@@ -437,6 +437,12 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
     # a less privileged user can write to.
     TIMEOUT_COMMAND: Final = "/usr/bin/timeout"
 
+    # Runs exec()'s command as `user`. By absolute path too: vagrant runs the
+    # command through the ssh user's login shell, whose PATH starts with
+    # ~/.local/bin on Ubuntu, so that user could otherwise supply the `sudo`
+    # that commands for root run through.
+    SUDO_COMMAND: Final = "/usr/bin/sudo"
+
     # Linux limits each argument of a program to 128 KiB (MAX_ARG_STRLEN), and
     # vagrant passes exec()'s command to ssh as a single one, `bash -l -c
     # '<command>'` with each ' written as '\''. exec() sends a command larger
@@ -940,8 +946,7 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         _, marker, guest_stderr = stderr.partition(f"{self.STDERR_MARKER}\n")
         return guest_stderr if marker else stderr
 
-    @staticmethod
-    def _as_user(command: str, user: str | None) -> str:
+    def _as_user(self, command: str, user: str | None) -> str:
         """Wrap command to run as user, if one is given."""
         if user is None:
             return command
@@ -950,7 +955,10 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         # exec()'s cwd/env handling also runs as the target user. `-n` makes a
         # non-compliant box fail fast ("sudo: a password is required" on
         # stderr) instead of hanging on a password prompt.
-        return f"sudo -H -n -u {shlex.quote(user)} sh -c {shlex.quote(command)}"
+        return (
+            f"{self.SUDO_COMMAND} -H -n -u {shlex.quote(user)} "
+            f"sh -c {shlex.quote(command)}"
+        )
 
     # _verify_exec_output_size() and _truncate_middle() are a port of
     # inspect_ai 0.3.123's private verify_exec_result_size() and
