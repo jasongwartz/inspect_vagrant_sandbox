@@ -85,6 +85,8 @@ def vagrant_example() -> Task:
     )
 ```
 
+If the path is all you need to set, Inspect's shorthand `sandbox=("vagrant", "./test/Vagrantfile.basic")` is equivalent; Inspect resolves a relative path given this way against the task file's directory.
+
 ### Multi-Machine
 
 Vagrant has support for ["multi-machine" setups](https://developer.hashicorp.com/vagrant/docs/multi-machine) (i.e. multiple guest VM configurations in a single `Vagrantfile`), which can be useful for writing evals that have complex multi-VM setups (e.g. an "attacker" and "victim" VM). If you're using a multi-machine `Vagrantfile`, you should ensure each "machine" is given a name:
