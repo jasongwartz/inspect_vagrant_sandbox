@@ -85,6 +85,20 @@ def vagrant_example() -> Task:
     )
 ```
 
+### Guest Requirements
+
+The provider talks to the guest by running commands over `vagrant ssh --command`, so a few things about the box you configure matter:
+
+- The SSH user's login shell must be POSIX-compatible, since commands are sent to it as shell strings.
+- `read_file()` and `write_file()` shell out to `base64`, `stat -L -c %s`, and `mkdir -p` on the guest. This works on Linux guests with GNU coreutils or BusyBox; BSD/macOS guests are not supported by `read_file()`.
+- Running a command as a specific user (Inspect's `user=` argument to `exec()`) requires the SSH user to have passwordless sudo access to that user, since it's run via `sudo -n -u <user>`. Vagrant's base box guidelines already require passwordless sudo for the SSH user, so a compliant box needs no extra configuration; the `-n` flag makes a non-compliant box fail fast with an error instead of hanging on a password prompt.
+
+A few other behaviours worth knowing:
+
+- `read_file()` paths are quoted for the shell rather than expanded, so `~`, `$VAR`, and globs are taken literally.
+- File operations raise `FileNotFoundError`, `IsADirectoryError`, or `PermissionError`, matching what you'd get from local file access.
+- Command output and file reads are capped (10 MiB per `exec()` stream, 100 MiB per `read_file()`); exceeding either raises `OutputLimitExceededError`.
+
 ### Multi-Machine
 
 Vagrant has support for ["multi-machine" setups](https://developer.hashicorp.com/vagrant/docs/multi-machine) (i.e. multiple guest VM configurations in a single `Vagrantfile`), which can be useful for writing evals that have complex multi-VM setups (e.g. an "attacker" and "victim" VM). If you're using a multi-machine `Vagrantfile`, you should ensure each "machine" is given a name:
