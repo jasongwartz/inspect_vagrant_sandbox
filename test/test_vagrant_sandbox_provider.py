@@ -574,7 +574,7 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_exec_large_command(self, tmp_path, mock_sandbox_dir):
+    async def test_exec_large_command(self, tmp_path, mock_sandbox_dir, monkeypatch):
         """Commands over Linux's 128 KiB limit on an argument still run.
 
         Runs exec() against a stand-in for `vagrant ssh --command` that, like
@@ -588,16 +588,14 @@ class TestVagrantSandboxEnvironment:
         sudo = bin_dir / "sudo"
         sudo.write_text('#!/bin/sh\nexport RAN_AS="$4"\nshift 4\nexec "$@"\n')
         sudo.chmod(0o755)
-        vagrant = Vagrant(
-            root=str(tmp_path),
-            env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
-        )
+        vagrant = Vagrant(root=str(tmp_path))
         vagrant._make_vagrant_command = lambda args: [
             "bash",
             "-c",
             "bash -c '" + args[-1].replace("'", "'\\''") + "'",
         ]
         env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant, "default")
+        monkeypatch.setattr(VagrantSandboxEnvironment, "SUDO_COMMAND", str(sudo))
         script = tmp_path / "run.sh"
         script.write_text("echo hi\n")
         script.chmod(0o644)
@@ -803,14 +801,17 @@ class TestVagrantSandboxEnvironment:
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_exec_forwards_user(self, mock_vagrant, mock_sandbox_dir):
-        """Test that user is applied via sudo, wrapping cwd/env handling."""
+        """Test that user is applied via sudo, by absolute path, wrapping cwd/env
+        handling."""
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
 
         await env.exec(["whoami"], user="root", cwd="/tmp")
 
         command = mock_vagrant.ssh.call_args[1]["command"]
-        assert command == EXEC_PREFIX + "sudo -H -n -u root sh -c 'cd /tmp && whoami'"
+        assert command == EXEC_PREFIX + (
+            "/usr/bin/sudo -H -n -u root sh -c 'cd /tmp && whoami'"
+        )
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -1613,7 +1614,7 @@ class TestTimeoutHandling:
 
         command = mock_vagrant.ssh.call_args[1]["command"]
         assert command == EXEC_PREFIX + (
-            "sudo -H -n -u root sh -c "
+            "/usr/bin/sudo -H -n -u root sh -c "
             "'cd /tmp && export A=b && /usr/bin/timeout -k 5s 5s whoami'"
         )
 
