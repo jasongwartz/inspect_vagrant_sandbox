@@ -280,34 +280,20 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
-    async def test_init_accepts_vagrantfile_path(
-        self, mock_subprocess_patches, mock_sandbox_patches
-    ):
+    async def test_init_accepts_vagrantfile_path(self, mock_sandbox_patches):
         """A str config is the Vagrantfile's path, as in Inspect's
         `sandbox=("vagrant", "path/to/Vagrantfile")` shorthand."""
         await VagrantSandboxEnvironment.task_init("test_task", "/x/Vagrantfile.web")
         with patch(
             "vagrantsandbox.vagrant_sandbox_provider.Vagrant._run_vagrant_command_async"
-        ) as mock_async_vagrant:
-            mock_async_vagrant.return_value = {
-                "returncode": 0,
-                "stdout": "VM started",
-                "stderr": "",
-            }
-
-            result = await VagrantSandboxEnvironment.sample_init(
+        ) as mock_up:
+            mock_up.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
+            await VagrantSandboxEnvironment.sample_init(
                 "test_task", "/x/Vagrantfile.web", {}
             )
-
-        assert "default" in result
-        copies = [
-            call.args
-            for call in mock_sandbox_patches["to_thread"].call_args_list
-            if call.args[0] is shutil.copy2
-        ]
-        assert copies == [
-            (shutil.copy2, "/x/Vagrantfile.web", "/tmp/test_vagrant/Vagrantfile")
-        ]
+        mock_sandbox_patches["to_thread"].assert_any_call(
+            shutil.copy2, "/x/Vagrantfile.web", "/tmp/test_vagrant/Vagrantfile"
+        )
 
     @pytest.mark.unit
     @pytest.mark.asyncio

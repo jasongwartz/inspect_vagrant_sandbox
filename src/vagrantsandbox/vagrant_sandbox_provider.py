@@ -411,25 +411,6 @@ async def _run_in_executor(func: Callable[..., T], *args: Any, **kwargs: Any) ->
     return await asyncio.to_thread(func, *args, **kwargs)
 
 
-def _resolve_config(
-    config: SandboxEnvironmentConfigType | None,
-) -> VagrantSandboxEnvironmentConfig:
-    """Resolve the config Inspect passes to task_init() and sample_init()."""
-    config = config or VagrantSandboxEnvironmentConfig()
-    if isinstance(config, str):
-        # Inspect's `sandbox=("vagrant", "path/to/Vagrantfile")` shorthand,
-        # which a dataset's `sandbox` field and `--sandbox vagrant:<path>`
-        # also produce. Inspect resolves a relative task-level path against
-        # the task's directory.
-        return VagrantSandboxEnvironmentConfig(vagrantfile_path=config)
-    if not isinstance(config, VagrantSandboxEnvironmentConfig):
-        raise TypeError(
-            "config must be VagrantSandboxEnvironmentConfig or a Vagrantfile path, "
-            f"got {type(config).__name__}"
-        )
-    return config
-
-
 @sandboxenv(name="vagrant")
 class VagrantSandboxEnvironment(SandboxEnvironment):
     logger = getLogger(__name__)
@@ -488,8 +469,11 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
     async def task_init(
         cls, task_name: str, config: SandboxEnvironmentConfigType | None
     ) -> None:
-        # Reject a bad config before any sample starts a VM
-        _resolve_config(config)
+        if config is not None:
+            if not isinstance(config, (str, VagrantSandboxEnvironmentConfig)):
+                raise ValueError(
+                    "config must be a VagrantSandboxEnvironmentConfig or a Vagrantfile path"
+                )
 
     @classmethod
     @override
@@ -499,7 +483,16 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         config: SandboxEnvironmentConfigType | None,
         metadata: dict[str, str],
     ) -> dict[str, SandboxEnvironment]:
-        config = _resolve_config(config)
+        # A str is Inspect's `sandbox=("vagrant", "path/to/Vagrantfile")` shorthand
+        config = (
+            VagrantSandboxEnvironmentConfig(vagrantfile_path=config)
+            if isinstance(config, str)
+            else config or VagrantSandboxEnvironmentConfig()
+        )
+        if not isinstance(config, VagrantSandboxEnvironmentConfig):
+            raise TypeError(
+                f"config must be VagrantSandboxEnvironmentConfig, got {type(config).__name__}"
+            )
 
         # Create unique suffix from sample metadata to avoid VM name conflicts.
         # Although the base class annotates metadata as dict[str, str], Inspect
