@@ -801,8 +801,7 @@ class TestVagrantSandboxEnvironment:
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_exec_forwards_user(self, mock_vagrant, mock_sandbox_dir):
-        """Test that user is applied via sudo, by absolute path, wrapping cwd/env
-        handling."""
+        """Test that user is applied via sudo, wrapping cwd/env handling."""
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
 
