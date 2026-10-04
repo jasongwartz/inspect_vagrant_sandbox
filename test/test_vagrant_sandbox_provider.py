@@ -44,6 +44,7 @@ def mock_vagrant():
     vagrant.ssh = AsyncMock()
     vagrant.up = Mock()
     vagrant.destroy = Mock()
+    vagrant.env = {}
     return vagrant
 
 
@@ -103,11 +104,17 @@ def mock_sandbox_patches():
             return_value=mock_sandbox,
         ) as mock_create,
         patch("asyncio.to_thread", new_callable=AsyncMock) as mock_to_thread,
+        patch(
+            "vagrantsandbox.vagrant_sandbox_provider.Vagrant.get_vm_names",
+            new_callable=AsyncMock,
+            return_value=["default"],
+        ) as mock_get_vm_names,
     ):
         yield {
             "create": mock_create,
             "to_thread": mock_to_thread,
             "sandbox": mock_sandbox,
+            "get_vm_names": mock_get_vm_names,
         }
 
 
@@ -243,7 +250,7 @@ class TestVagrantSandboxEnvironment:
     @pytest.mark.unit
     def test_init(self, mock_sandbox_dir, mock_vagrant):
         """Test VagrantSandboxEnvironment initialization."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         assert env.vagrant == mock_vagrant
         assert env.sandbox_dir == mock_sandbox_dir
 
@@ -320,6 +327,33 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "discovery, error",
+        [
+            (
+                {"side_effect": subprocess.CalledProcessError(1, ["vagrant"])},
+                subprocess.CalledProcessError,
+            ),
+            ({"return_value": []}, RuntimeError),
+        ],
+    )
+    async def test_sample_init_fails_when_discovery_fails(
+        self, sample_config, mock_sandbox_patches, discovery, error
+    ):
+        """A failed or empty VM discovery fails the sample and its cleanup runs."""
+        mock_sandbox_patches["get_vm_names"].configure_mock(**discovery)
+        with patch(
+            "vagrantsandbox.vagrant_sandbox_provider.cleanup_sandbox_with_vms"
+        ) as mock_cleanup:
+            with pytest.raises(error):
+                await VagrantSandboxEnvironment.sample_init(
+                    "test_task", sample_config, {}
+                )
+
+            mock_cleanup.assert_awaited_once()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_sample_init_cleans_up_after_timeout(
         self, sample_config, mock_sandbox_patches
     ):
@@ -354,7 +388,7 @@ class TestVagrantSandboxEnvironment:
             return_value={"returncode": 0, "stdout": "", "stderr": ""}
         )
 
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         environments = {"default": env}
 
         await VagrantSandboxEnvironment.sample_cleanup(
@@ -368,6 +402,36 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_sample_cleanup_multi_vm(self, tmp_path, mock_vagrant, caplog):
+        """The VMs of a sample share one sandbox directory: clean it up once."""
+        caplog.set_level("WARNING", logger="vagrantsandbox")
+        sandbox_dir = SandboxDirectory(tmp_path / "sample01-abc123")
+        sandbox_dir.path.mkdir()
+        mock_vagrant._run_vagrant_command_async = AsyncMock(
+            return_value={"returncode": 0, "stdout": "", "stderr": ""}
+        )
+
+        # As sample_init returns them: one environment per VM, plus "default"
+        target = VagrantSandboxEnvironment(sandbox_dir, mock_vagrant, "target")
+        attacker = VagrantSandboxEnvironment(sandbox_dir, mock_vagrant, "attacker")
+        environments = {"default": target, "target": target, "attacker": attacker}
+
+        with patch.object(
+            sandbox_dir, "cleanup", wraps=sandbox_dir.cleanup
+        ) as mock_cleanup:
+            await VagrantSandboxEnvironment.sample_cleanup(
+                "test_task", None, environments, interrupted=False
+            )
+
+        mock_vagrant._run_vagrant_command_async.assert_called_once_with(
+            ["destroy", "-f"]
+        )
+        mock_cleanup.assert_awaited_once()
+        assert not sandbox_dir.path.exists()
+        assert caplog.messages == []
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_sample_cleanup_keeps_directory_when_destroy_fails(
         self, mock_vagrant, mock_sandbox_dir, mock_subprocess_patches
     ):
@@ -377,7 +441,7 @@ class TestVagrantSandboxEnvironment:
             return_value={"returncode": 1, "stdout": "", "stderr": "destroy failed"}
         )
 
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
 
         await VagrantSandboxEnvironment.sample_cleanup(
             "test_task", None, {"default": env}, interrupted=False
@@ -389,7 +453,7 @@ class TestVagrantSandboxEnvironment:
     @pytest.mark.asyncio
     async def test_sample_cleanup_interrupted(self, mock_vagrant, mock_sandbox_dir):
         """Test cleanup when interrupted (should not destroy VM)."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         environments = {"default": env}
 
         with patch("vagrant.subprocess.run") as mock_subprocess_run:
@@ -404,7 +468,7 @@ class TestVagrantSandboxEnvironment:
     @pytest.mark.asyncio
     async def test_exec_success(self, mock_vagrant, mock_sandbox_dir):
         """Test successful command execution."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         mock_vagrant.ssh.return_value = {
             "returncode": 0,
             "stdout": "command output",
@@ -418,14 +482,14 @@ class TestVagrantSandboxEnvironment:
         assert result.stdout == "command output"
         assert result.stderr == ""
         mock_vagrant.ssh.assert_called_once_with(
-            vm_name=None, command=EXEC_PREFIX + "ls -la", input=None, timeout=None
+            vm_name="default", command=EXEC_PREFIX + "ls -la", input=None, timeout=None
         )
 
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_exec_failure(self, mock_vagrant, mock_sandbox_dir):
         """Test failed command execution."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         mock_vagrant.ssh.return_value = {
             "returncode": 1,
             "stdout": "",
@@ -444,7 +508,7 @@ class TestVagrantSandboxEnvironment:
         self, mock_vagrant, mock_sandbox_dir
     ):
         """Vagrant's own warnings precede the marker; only what follows is returned."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         mock_vagrant.ssh.return_value = {
             "returncode": 0,
             "stdout": "boof\n",
@@ -463,7 +527,7 @@ class TestVagrantSandboxEnvironment:
         self, mock_vagrant, mock_sandbox_dir
     ):
         """If ssh failed before the command ran, all of stderr is returned."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         ssh_error = "ssh: connect to host 192.168.121.5 port 22: Connection refused\n"
         mock_vagrant.ssh.return_value = {
             "returncode": 255,
@@ -491,7 +555,7 @@ class TestVagrantSandboxEnvironment:
             "sh",
             args[-1],  # the command passed to `vagrant ssh --command`
         ]
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant, "default")
 
         result = await env.exec(["sh", "-c", "echo boof; echo baz >&2"])
         assert (result.returncode, result.stdout, result.stderr) == (
@@ -510,11 +574,142 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_exec_large_command(self, tmp_path, mock_sandbox_dir):
+        """Commands over Linux's 128 KiB limit on an argument still run.
+
+        Runs exec() against a stand-in for `vagrant ssh --command` that, like
+        vagrant, passes the command on to a real shell as a single argument,
+        `bash -c '<command>'` with each ' written as '\\''.
+        """
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        # A stand-in for sudo that runs what follows `-H -n -u USER`, with USER
+        # in $RAN_AS
+        sudo = bin_dir / "sudo"
+        sudo.write_text('#!/bin/sh\nexport RAN_AS="$4"\nshift 4\nexec "$@"\n')
+        sudo.chmod(0o755)
+        vagrant = Vagrant(
+            root=str(tmp_path),
+            env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+        )
+        vagrant._make_vagrant_command = lambda args: [
+            "bash",
+            "-c",
+            "bash -c '" + args[-1].replace("'", "'\\''") + "'",
+        ]
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant, "default")
+        script = tmp_path / "run.sh"
+        script.write_text("echo hi\n")
+        script.chmod(0o644)
+        # As in Inspect's self_check test_exec_large_command: ~1 MiB of arguments
+        chunks = ["x" * 65536] * 16
+
+        result = await env.exec(["printf", "%s", *chunks])
+        assert (result.returncode, result.stdout, result.stderr) == (
+            0,
+            "".join(chunks),
+            "",
+        )
+
+        # Under the limit, and still once `user` has quoted each ', but not once
+        # vagrant has too
+        result = await env.exec(["printf", "%s", "'" * 3000], user="someone")
+        assert (result.returncode, result.stdout) == (0, "'" * 3000)
+
+        # Under the limit, but not with the stderr marker and sudo around it
+        arg = "x" * (128 * 1024 - 64)
+        result = await env.exec(["printf", "%s", arg], user="someone")
+        assert (result.returncode, result.stdout) == (0, arg)
+
+        # The input follows the command on stdin
+        result = await env.exec(
+            ["sh", "-c", 'cat; pwd; echo "$KEY $RAN_AS"; exit 3', "sh", *chunks[:4]],
+            input="stdin\n",
+            cwd=str(tmp_path),
+            env={"KEY": "value"},
+            user="someone",
+        )
+        assert (result.returncode, result.stdout, result.stderr) == (
+            3,
+            f"stdin\n{tmp_path}\nvalue someone\n",
+            "",
+        )
+
+        with pytest.raises(PermissionError):
+            await env.exec([str(script), *chunks[:2]])
+
+        # Encoded as an argument would be, and a NUL rejected as in one
+        od = ["sh", "-c", 'printf %s "$1" | od -An -tx1', "sh", "\udcff"]
+        result = await env.exec([*od, *chunks[:2]])
+        assert result.stdout.split() == ["ff"]
+        with pytest.raises(ValueError, match="null byte"):
+            await env.exec(["printf", "%s", "a\0b", *chunks[:2]])
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("received", [0, 10, 150_000])
+    async def test_exec_large_command_cut_short(
+        self, tmp_path, mock_sandbox_dir, received
+    ):
+        """If the guest gets only part of a large command, none of it runs."""
+        vagrant = Vagrant(root=str(tmp_path))
+        vagrant._make_vagrant_command = lambda args: [
+            "bash",
+            "-c",
+            f"head -c {received} | bash -c '" + args[-1].replace("'", "'\\''") + "'",
+        ]
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant, "default")
+
+        result = await env.exec(["sh", "-c", "echo ran", "sh", *["x" * 65536] * 4])
+
+        # A syntax error: the `{` it starts with is never closed
+        assert (result.returncode, result.stdout) == (2, "")
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_large_command_dd_error(self, tmp_path, mock_sandbox_dir):
+        """If the guest's dd can't read a large command, its error is in stderr."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        dd = bin_dir / "dd"
+        dd.write_text("#!/bin/sh\necho 'dd: invalid input flag' >&2\nexit 1\n")
+        dd.chmod(0o755)
+        vagrant = Vagrant(
+            root=str(tmp_path),
+            env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"},
+        )
+        vagrant._make_vagrant_command = lambda args: ["bash", "-c", args[-1]]
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant, "default")
+
+        result = await env.exec(["sh", "-c", "echo ran", "sh", *["x" * 65536] * 4])
+
+        assert (result.returncode, result.stdout) == (2, "")
+        assert "dd: invalid input flag" in result.stderr
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_command_under_size_limit(self, mock_vagrant, mock_sandbox_dir):
+        """A command under MAX_COMMAND_SIZE is sent as is."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
+        mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
+        arg = "x" * (VagrantSandboxEnvironment.MAX_COMMAND_SIZE - 100)
+
+        await env.exec(["true", arg], input="data")
+
+        mock_vagrant.ssh.assert_called_once_with(
+            vm_name="default",
+            command=EXEC_PREFIX + f"true {arg}",
+            input="data",
+            timeout=None,
+        )
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_exec_escapes_shell_metacharacters(
         self, mock_vagrant, mock_sandbox_dir
     ):
         """Test that shell metacharacters are properly escaped."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
 
         await env.exec(["bash", "-c", "ls && cat /etc/passwd"])
@@ -532,7 +727,7 @@ class TestVagrantSandboxEnvironment:
         self, mock_vagrant, mock_sandbox_dir, metachar
     ):
         """Test various shell metacharacters are escaped."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
 
         await env.exec(["echo", f"test {metachar} injection"])
@@ -546,7 +741,7 @@ class TestVagrantSandboxEnvironment:
     @pytest.mark.asyncio
     async def test_exec_forwards_env(self, mock_vagrant, mock_sandbox_dir):
         """Test that env vars are exported before the command."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
 
         await env.exec(["printenv", "MY_VAR"], env={"MY_VAR": "my value"})
@@ -561,7 +756,7 @@ class TestVagrantSandboxEnvironment:
         self, mock_vagrant, mock_sandbox_dir, key
     ):
         """Env names that aren't shell variable names never reach the guest."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
 
         with pytest.raises(ValueError, match="Invalid environment variable name"):
@@ -573,7 +768,7 @@ class TestVagrantSandboxEnvironment:
     @pytest.mark.asyncio
     async def test_exec_accepts_valid_env_names(self, mock_vagrant, mock_sandbox_dir):
         """Lowercase, digits and underscores are fine in env names."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
 
         await env.exec(["true"], env={"MY_VAR_1": "a", "_lower": "b"})
@@ -585,7 +780,7 @@ class TestVagrantSandboxEnvironment:
     @pytest.mark.asyncio
     async def test_exec_forwards_cwd(self, mock_vagrant, mock_sandbox_dir):
         """Test that cwd is applied via cd before the command."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
 
         await env.exec(["ls"], cwd="/usr/bin")
@@ -597,7 +792,7 @@ class TestVagrantSandboxEnvironment:
     @pytest.mark.asyncio
     async def test_exec_cwd_and_env_are_chained(self, mock_vagrant, mock_sandbox_dir):
         """A cwd that fails must abort the command, not run it somewhere else."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
 
         await env.exec(["ls"], cwd="/missing", env={"MY_VAR": "value"})
@@ -609,7 +804,7 @@ class TestVagrantSandboxEnvironment:
     @pytest.mark.asyncio
     async def test_exec_forwards_user(self, mock_vagrant, mock_sandbox_dir):
         """Test that user is applied via sudo, wrapping cwd/env handling."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
 
         await env.exec(["whoami"], user="root", cwd="/tmp")
@@ -621,7 +816,7 @@ class TestVagrantSandboxEnvironment:
     @pytest.mark.asyncio
     async def test_exec_permission_denied(self, mock_vagrant, mock_sandbox_dir):
         """Test that executing a non-executable file raises PermissionError."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         mock_vagrant.ssh.return_value = {
             "returncode": 126,
             "stdout": "",
@@ -649,7 +844,7 @@ class TestVagrantSandboxEnvironment:
             "sh",
             args[-1],  # the command passed to `vagrant ssh --command`
         ]
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant, "default")
         script = tmp_path / "run.sh"
         script.write_text("echo hi\n")
         script.chmod(0o644)
@@ -679,7 +874,7 @@ class TestVagrantSandboxEnvironment:
 
         Inspect shows the model `f"{ex.strerror}."` plus the filename.
         """
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         mock_vagrant.ssh.return_value = {
             "returncode": 126,
             "stdout": "",
@@ -698,7 +893,7 @@ class TestVagrantSandboxEnvironment:
     @pytest.mark.asyncio
     async def test_exec_output_over_limit(self, mock_vagrant, mock_sandbox_dir):
         """Test that output larger than 10 MiB raises OutputLimitExceededError."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         mock_vagrant.ssh.return_value = {
             "returncode": 0,
             "stdout": "x" * (10 * 1024**2 + 1),
@@ -712,7 +907,7 @@ class TestVagrantSandboxEnvironment:
     @pytest.mark.asyncio
     async def test_exec_stderr_over_limit(self, mock_vagrant, mock_sandbox_dir):
         """stderr has its own 10 MiB limit; the error keeps both ends of it."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         limit = 10 * 1024**2
         mock_vagrant.ssh.return_value = {
             "returncode": 1,
@@ -732,7 +927,7 @@ class TestVagrantSandboxEnvironment:
         self, mock_vagrant, mock_sandbox_dir
     ):
         """The limit counts UTF-8 bytes, not characters."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         mock_vagrant.ssh.return_value = {
             "returncode": 0,
             "stdout": "é" * (5 * 1024**2 + 1),  # 10 MiB + 2 bytes
@@ -746,7 +941,7 @@ class TestVagrantSandboxEnvironment:
     @pytest.mark.asyncio
     async def test_exec_output_at_limit(self, mock_vagrant, mock_sandbox_dir):
         """Each stream may be exactly 10 MiB."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         stdout = "x" * (10 * 1024**2)
         stderr = "é" * (5 * 1024**2)  # 10 MiB
         mock_vagrant.ssh.return_value = {
@@ -764,7 +959,7 @@ class TestVagrantSandboxEnvironment:
     @pytest.mark.asyncio
     async def test_write_file_success(self, mock_vagrant, mock_sandbox_dir):
         """Test successful file writing."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
 
         await env.write_file("/tmp/test.txt", "test content")
@@ -784,7 +979,7 @@ class TestVagrantSandboxEnvironment:
     @pytest.mark.asyncio
     async def test_write_file_permission_denied(self, mock_vagrant, mock_sandbox_dir):
         """Test that write failures from missing permissions raise PermissionError."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         mock_vagrant.ssh.return_value = {
             "returncode": 1,
             "stdout": "",
@@ -803,7 +998,7 @@ class TestVagrantSandboxEnvironment:
     @pytest.mark.asyncio
     async def test_write_file_is_directory(self, mock_vagrant, mock_sandbox_dir):
         """Test that writing to a directory raises IsADirectoryError."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         mock_vagrant.ssh.return_value = {
             "returncode": 1,
             "stdout": "",
@@ -821,7 +1016,7 @@ class TestVagrantSandboxEnvironment:
     @pytest.mark.asyncio
     async def test_write_file_unmapped_failure(self, mock_vagrant, mock_sandbox_dir):
         """Test that unrecognized write failures raise CalledProcessError."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         mock_vagrant.ssh.return_value = {
             "returncode": 1,
             "stdout": "",
@@ -836,7 +1031,7 @@ class TestVagrantSandboxEnvironment:
     @pytest.mark.asyncio
     async def test_write_file_bytes_content(self, mock_vagrant, mock_sandbox_dir):
         """Test writing bytes content to file, including non-UTF-8 bytes."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
 
         await env.write_file("/tmp/test.txt", b"\xc3\x28")  # invalid UTF-8
@@ -860,7 +1055,7 @@ class TestVagrantSandboxEnvironment:
             "sh",
             args[-1],  # the command passed to `vagrant ssh --command`
         ]
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant, "default")
 
         with pytest.raises(IsADirectoryError):
             await env.read_file(str(tmp_path))
@@ -892,7 +1087,7 @@ class TestVagrantSandboxEnvironment:
             "sh",
             ssh_error,
         ]
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant, "default")
         file = str(tmp_path / "file.txt")
 
         with pytest.raises(subprocess.CalledProcessError) as excinfo:
@@ -908,7 +1103,7 @@ class TestVagrantSandboxEnvironment:
     @pytest.mark.asyncio
     async def test_read_file_success(self, mock_vagrant, mock_sandbox_dir):
         """Test successful file reading."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         mock_vagrant.ssh.return_value = {
             "returncode": 0,
             "stdout": read_file_stdout(b"file content"),
@@ -928,7 +1123,7 @@ class TestVagrantSandboxEnvironment:
     @pytest.mark.asyncio
     async def test_read_file_binary(self, mock_vagrant, mock_sandbox_dir):
         """Test reading non-UTF-8 binary content with text=False."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         binary_content = b"\xc3\x28"  # invalid UTF-8
         mock_vagrant.ssh.return_value = {
             "returncode": 0,
@@ -956,7 +1151,7 @@ class TestVagrantSandboxEnvironment:
         self, mock_vagrant, mock_sandbox_dir, stdout
     ):
         """Output missing read_file()'s markers raises instead of being decoded."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         mock_vagrant.ssh.return_value = {
             "returncode": 0,
             "stdout": stdout,
@@ -982,7 +1177,7 @@ class TestVagrantSandboxEnvironment:
             "sh",
             args[-1],  # the command passed to `vagrant ssh --command`
         ]
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant, "default")
         (tmp_path / "all_bytes.bin").write_bytes(bytes(range(256)))
         (tmp_path / "empty.bin").write_bytes(b"")
 
@@ -994,7 +1189,7 @@ class TestVagrantSandboxEnvironment:
     @pytest.mark.asyncio
     async def test_read_file_limit(self, mock_vagrant, mock_sandbox_dir):
         """Test that reading an oversized file raises OutputLimitExceededError."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         mock_vagrant.ssh.return_value = {
             "returncode": 70,
             "stdout": "",
@@ -1021,7 +1216,7 @@ class TestVagrantSandboxEnvironment:
             "-c",
             args[-1],  # the command passed to `vagrant ssh --command`
         ]
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant, "default")
         (tmp_path / "big.txt").write_text("x" * 1001)
         (tmp_path / "link").symlink_to(tmp_path / "big.txt")
 
@@ -1032,7 +1227,7 @@ class TestVagrantSandboxEnvironment:
     @pytest.mark.asyncio
     async def test_read_file_not_found(self, mock_vagrant, mock_sandbox_dir):
         """Test that reading a missing file raises FileNotFoundError."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         mock_vagrant.ssh.return_value = {
             "returncode": 1,
             "stdout": "",
@@ -1050,7 +1245,7 @@ class TestVagrantSandboxEnvironment:
     @pytest.mark.asyncio
     async def test_read_file_unmapped_failure(self, mock_vagrant, mock_sandbox_dir):
         """Test that unrecognized read failures raise CalledProcessError."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         mock_vagrant.ssh.return_value = {
             "returncode": 1,
             "stdout": "",
@@ -1090,7 +1285,7 @@ class TestVagrantSandboxEnvironment:
         )
         # Run the command passed to `vagrant ssh --command` in a real shell
         vagrant._make_vagrant_command = lambda args: ["bash", "-c", args[-1]]
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant, "default")
         file = str(tmp_path / "file.txt")
 
         with pytest.raises(FileNotFoundError):
@@ -1102,11 +1297,46 @@ class TestVagrantSandboxEnvironment:
     @pytest.mark.asyncio
     async def test_connection(self, mock_vagrant, mock_sandbox_dir):
         """Test connection method."""
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         connection = await env.connection()
 
         assert connection.type == "vagrant"
-        assert connection.command.endswith("vagrant ssh")
+        assert connection.command.endswith("vagrant ssh default")
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_connection_names_the_vm(self, mock_vagrant, mock_sandbox_dir):
+        """A multi-VM environment needs the VM name to connect to."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "web")
+
+        connection = await env.connection()
+
+        assert connection.command.endswith("vagrant ssh web")
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_connection_as_user(self, mock_vagrant, mock_sandbox_dir):
+        """Test that the requested user is used, not the box's ssh user."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
+
+        connection = await env.connection(user="root")
+
+        assert connection.command.endswith("vagrant ssh default -c 'sudo -u root -i'")
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_connection_includes_vm_suffix(self, mock_vagrant, mock_sandbox_dir):
+        """INSPECT_VM_SUFFIX must be set or vagrant can't resolve machine names.
+
+        Vagrantfiles derive machine names from INSPECT_VM_SUFFIX, so the
+        pasted command must re-evaluate the Vagrantfile with the same value.
+        """
+        mock_vagrant.env = {"INSPECT_VM_SUFFIX": "-abc-12345678"}
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
+
+        connection = await env.connection()
+
+        assert connection.command.startswith("INSPECT_VM_SUFFIX=-abc-12345678 ")
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -1185,14 +1415,17 @@ class TestDefaultConcurrency:
 
     @pytest.mark.unit
     def test_default_concurrency_returns_cpu_count(self):
-        """Test that default_concurrency returns default_max_subprocesses value."""
-        with patch(
-            "vagrantsandbox.vagrant_sandbox_provider.default_max_subprocesses",
-            return_value=8,
-        ) as mock_default:
+        """Test that default_concurrency returns os.process_cpu_count()."""
+        with patch("os.process_cpu_count", return_value=3) as mock_count:
             result = VagrantSandboxEnvironment.default_concurrency()
-            mock_default.assert_called_once()
-            assert result == 8
+            mock_count.assert_called_once()
+            assert result == 3
+
+    @pytest.mark.unit
+    def test_default_concurrency_unknown_cpu_count(self):
+        """Test that default_concurrency falls back to 1 when the count is unknown."""
+        with patch("os.process_cpu_count", return_value=None):
+            assert VagrantSandboxEnvironment.default_concurrency() == 1
 
 
 @pytest.mark.unit
@@ -1349,19 +1582,159 @@ class TestTimeoutHandling:
     @pytest.mark.unit
     @pytest.mark.asyncio
     async def test_exec_passes_timeout_to_ssh(self, mock_sandbox_dir):
-        """Test that exec() passes timeout through to vagrant.ssh()."""
+        """exec() runs the command under `timeout` in the guest.
+
+        vagrant.ssh()'s own timeout is longer: it's only a fallback.
+        """
         mock_vagrant = Mock(spec=Vagrant)
         mock_vagrant.ssh = AsyncMock(
             return_value={"returncode": 0, "stdout": "output", "stderr": ""}
         )
 
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         result = await env.exec(["ls", "-la"], timeout=120)
 
         assert result.success is True
         mock_vagrant.ssh.assert_called_once_with(
-            vm_name=None, command=EXEC_PREFIX + "ls -la", input=None, timeout=120
+            vm_name="default",
+            command=EXEC_PREFIX + "/usr/bin/timeout -k 5s 120s ls -la",
+            input=None,
+            timeout=150,
         )
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_timeout_runs_as_user(self, mock_vagrant, mock_sandbox_dir):
+        """The guest's `timeout` runs inside the cwd/env/user handling."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
+        mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
+
+        await env.exec(["whoami"], user="root", cwd="/tmp", env={"A": "b"}, timeout=5)
+
+        command = mock_vagrant.ssh.call_args[1]["command"]
+        assert command == EXEC_PREFIX + (
+            "sudo -H -n -u root sh -c "
+            "'cd /tmp && export A=b && /usr/bin/timeout -k 5s 5s whoami'"
+        )
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("timeout", [0, -5])
+    async def test_exec_rejects_non_positive_timeout(
+        self, mock_vagrant, mock_sandbox_dir, timeout
+    ):
+        """`timeout 0s` in the guest would mean no timeout at all."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
+
+        with pytest.raises(ValueError, match="timeout must be positive"):
+            await env.exec(["true"], timeout=timeout)
+
+        mock_vagrant.ssh.assert_not_called()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "returncode,elapsed,timed_out",
+        [
+            (124, 0, True),  # GNU timeout: the command was stopped by SIGTERM
+            (137, 30, True),  # GNU timeout: the command ignored SIGTERM
+            (143, 30, True),  # BusyBox timeout
+            (137, 0, False),  # e.g. the OOM killer
+            (143, 0, False),  # e.g. `kill $$`
+            (1, 30, False),
+        ],
+    )
+    async def test_exec_raises_timeout_error_for_guest_timeout(
+        self, mock_vagrant, mock_sandbox_dir, returncode, elapsed, timed_out
+    ):
+        """The guest's `timeout` exit codes raise TimeoutError.
+
+        A signal death well before the timeout is the command's own result.
+        """
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
+        mock_vagrant.ssh.return_value = {
+            "returncode": returncode,
+            "stdout": "",
+            "stderr": "",
+        }
+
+        with patch("vagrantsandbox.vagrant_sandbox_provider.time") as mock_time:
+            mock_time.monotonic.side_effect = [100.0, 100.0 + elapsed]
+            if timed_out:
+                with pytest.raises(TimeoutError, match="timed out after 30 seconds"):
+                    await env.exec(["sleep", "60"], timeout=30)
+            else:
+                result = await env.exec(["sleep", "60"], timeout=30)
+                assert result.returncode == returncode
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_timeout_kills_command_in_guest(
+        self, tmp_path, mock_sandbox_dir
+    ):
+        """On a timeout the command and its children stop running.
+
+        Killing `vagrant ssh` doesn't stop them in the guest (sshd doesn't
+        signal a --no-tty command), and killing this stand-in for it doesn't
+        either.
+        """
+        vagrant = Vagrant(root=str(tmp_path))
+        vagrant._make_vagrant_command = lambda args: [
+            "sh",
+            "-c",
+            'echo "[fog][WARNING] host noise" >&2; bash -c "$1"',
+            "sh",
+            args[-1],  # the command passed to `vagrant ssh --command`
+        ]
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant, "default")
+        marker = f"exec-timeout-{os.urandom(8).hex()}"
+
+        # The parent and a backgrounded child both have the marker in their
+        # command line (`; :` stops sh exec'ing `sleep`, which would drop it)
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(
+                env.exec(
+                    ["sh", "-c", f"sh -c 'sleep 30; :' {marker} & sleep 30; :"],
+                    timeout=1,
+                ),
+                timeout=20,
+            )
+
+        ps = subprocess.run(
+            ["ps", "-eww", "-o", "pid,args"], capture_output=True, text=True, check=True
+        )
+        assert [line for line in ps.stdout.splitlines() if marker in line] == []
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_results_under_guest_timeout(self, tmp_path, mock_sandbox_dir):
+        """Running under the guest's `timeout` doesn't change exec()'s results."""
+        vagrant = Vagrant(root=str(tmp_path))
+        vagrant._make_vagrant_command = lambda args: [
+            "sh",
+            "-c",
+            'echo "[fog][WARNING] host noise" >&2; bash -c "$1"',
+            "sh",
+            args[-1],  # the command passed to `vagrant ssh --command`
+        ]
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant, "default")
+
+        result = await env.exec(["sh", "-c", "kill -TERM $$"], timeout=30)
+        assert result.returncode == 143
+
+        result = await env.exec(["/nonexistent"], timeout=30)
+        assert result.returncode == 127
+
+        # `timeout`, not the shell, reports that it can't execute cmd[0], with
+        # the name quoted differently in UTF-8 locales
+        script = tmp_path / "run.sh"
+        script.write_text("echo hi\n")
+        script.chmod(0o644)
+        for locale in ["C", "C.UTF-8"]:
+            with pytest.raises(PermissionError):
+                await env.exec([str(script)], env={"LC_ALL": locale}, timeout=30)
+        result = await env.exec(["sh", "-c", str(script)], timeout=30)
+        assert result.returncode == 126
 
     @pytest.mark.unit
     @pytest.mark.asyncio
@@ -1372,7 +1745,7 @@ class TestTimeoutHandling:
             side_effect=TimeoutError("Command execution timed out after 5 seconds.")
         )
 
-        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant)
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
 
         with pytest.raises(TimeoutError) as exc_info:
             await env.exec(["sleep", "1000"], timeout=5)
