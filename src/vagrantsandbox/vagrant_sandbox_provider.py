@@ -470,8 +470,10 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         cls, task_name: str, config: SandboxEnvironmentConfigType | None
     ) -> None:
         if config is not None:
-            if not isinstance(config, VagrantSandboxEnvironmentConfig):
-                raise ValueError("config must be a VagrantSandboxEnvironmentConfig")
+            if not isinstance(config, (str, VagrantSandboxEnvironmentConfig)):
+                raise ValueError(
+                    "config must be a VagrantSandboxEnvironmentConfig or a Vagrantfile path"
+                )
 
     @classmethod
     @override
@@ -481,7 +483,12 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         config: SandboxEnvironmentConfigType | None,
         metadata: dict[str, str],
     ) -> dict[str, SandboxEnvironment]:
-        config = config or VagrantSandboxEnvironmentConfig()
+        # A str is Inspect's `sandbox=("vagrant", "path/to/Vagrantfile")` shorthand
+        config = (
+            VagrantSandboxEnvironmentConfig(vagrantfile_path=config)
+            if isinstance(config, str)
+            else config or VagrantSandboxEnvironmentConfig()
+        )
         if not isinstance(config, VagrantSandboxEnvironmentConfig):
             raise TypeError(
                 f"config must be VagrantSandboxEnvironmentConfig, got {type(config).__name__}"
