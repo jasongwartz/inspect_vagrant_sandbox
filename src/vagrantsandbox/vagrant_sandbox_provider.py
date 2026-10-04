@@ -43,6 +43,15 @@ from platformdirs import user_cache_dir
 from pydantic import BaseModel, Field, field_validator
 from vagrant import Status, Vagrant as BaseVagrant
 
+try:
+    from inspect_ai.util import (  # type: ignore[attr-defined, unused-ignore]
+        SandboxUnavailableError,
+    )
+except ImportError:  # inspect_ai < 0.3.260
+
+    class SandboxUnavailableError(RuntimeError):  # type: ignore[no-redef]
+        """Stand-in for inspect_ai's; it fails the sample like any other error."""
+
 
 def _get_max_vagrant_startups() -> int | None:
     """Get the maximum number of concurrent vagrant up operations.
@@ -894,6 +903,17 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                 timeout=None if timeout is None else timeout + 30,
             )
             elapsed = time.monotonic() - start
+            if (
+                result["returncode"] != 0
+                and f"{self.STDERR_MARKER}\n" not in result["stderr"]
+            ):
+                # No marker: vagrant ssh failed before the command ran, so its
+                # output isn't the command's (often empty: vagrant's ssh LogLevel=FATAL)
+                raise SandboxUnavailableError(
+                    "vagrant ssh failed before running the command (exit status "
+                    f"{result['returncode']}): "
+                    f"{result['stderr'].strip() or 'no output'}"
+                )
 
             exec_result = ExecResult(
                 success=result["returncode"] == 0,
