@@ -23,8 +23,8 @@ from vagrantsandbox.vagrant_sandbox_provider import (
     _startup_semaphore,
 )
 
-# exec() prints a marker to the guest's stderr before running the command.
-EXEC_PREFIX = f"echo {VagrantSandboxEnvironment.STDERR_MARKER} >&2; "
+# exec() sets an EXIT trap and prints a stderr marker before the command.
+EXEC_PREFIX = f"trap : EXIT; echo {VagrantSandboxEnvironment.STDERR_MARKER} >&2; "
 
 
 def read_file_stdout(contents: bytes) -> str:
@@ -1735,6 +1735,39 @@ class TestTimeoutHandling:
                 await env.exec([str(script)], env={"LC_ALL": locale}, timeout=30)
         result = await env.exec(["sh", "-c", str(script)], timeout=30)
         assert result.returncode == 126
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_exec_reports_signal_deaths_as_a_shell_does(
+        self, tmp_path, mock_sandbox_dir
+    ):
+        """A command killed by a signal exits 128+N, as from a shell.
+
+        bash execs the last command of `bash -c` when no trap is set, and ssh
+        exits 255 when what it ran dies of a signal, instead of reporting it.
+        """
+        vagrant = Vagrant(root=str(tmp_path))
+        # A stand-in for `vagrant ssh` that, like ssh, exits 255 if the
+        # command's bash (or what bash exec'd) is killed by a signal
+        vagrant._make_vagrant_command = lambda args: [
+            sys.executable,
+            "-c",
+            "import subprocess, sys; "
+            "rc = subprocess.call(['bash', '-c', sys.argv[1]]); "
+            "sys.exit(255 if rc < 0 else rc)",
+            args[-1],  # the command passed to `vagrant ssh --command`
+        ]
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant, "default")
+
+        result = await env.exec(["sh", "-c", "kill -TERM $$"])
+        assert result.returncode == 143
+        result = await env.exec(["sh", "-c", "exit 3"])
+        assert result.returncode == 3
+        result = await env.exec(["sh", "-c", "kill -TERM $$"], timeout=30)
+        assert result.returncode == 143
+        # Ignores SIGTERM, so `timeout` SIGKILLs it (and itself) 5s later
+        with pytest.raises(TimeoutError):
+            await env.exec(["sh", "-c", "trap '' TERM; sleep 30"], timeout=1)
 
     @pytest.mark.unit
     @pytest.mark.asyncio

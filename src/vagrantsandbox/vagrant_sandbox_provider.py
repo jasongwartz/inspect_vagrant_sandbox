@@ -885,7 +885,10 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             start = time.monotonic()
             result = await self.vagrant.ssh(
                 vm_name=self.vm_name,
-                command=f"echo {self.STDERR_MARKER} >&2; {ssh_command}",
+                # The EXIT trap stops bash exec'ing the last command of
+                # vagrant's `bash -l -c`: killed by a signal, it then exits
+                # 128+N (e.g. 137, so TimeoutError) instead of ssh's 255.
+                command=f"trap : EXIT; echo {self.STDERR_MARKER} >&2; {ssh_command}",
                 input=ssh_input,
                 # Only a fallback for a hung vagrant or ssh: the guest's timeout
                 # returns within timeout + 5s of the command starting, and
