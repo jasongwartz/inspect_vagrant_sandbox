@@ -119,6 +119,13 @@ def get_sandbox_cache_dir() -> Path:
     return base_dir
 
 
+# Sandbox directories this process created and has not removed yet. The cache
+# directory is shared with every other process using the provider (e.g. two
+# `inspect eval`s on one host), and their sandboxes are live, so task_cleanup()
+# only touches these. Sandboxes left behind by earlier runs are cli_cleanup()'s.
+_own_sandbox_dirs: set[Path] = set()
+
+
 class SandboxDirectory:
     """
     Manages sandbox directories stored in user cache.
@@ -151,6 +158,7 @@ class SandboxDirectory:
 
         path = base_dir / subdir_name
         await asyncio.to_thread(path.mkdir, exist_ok=True)
+        _own_sandbox_dirs.add(path)
 
         cls.logger.debug(f"Created sandbox directory: {path}")
         return cls(path)
@@ -159,6 +167,7 @@ class SandboxDirectory:
         """Remove the sandbox directory."""
         if self.path.exists():
             await asyncio.to_thread(shutil.rmtree, self.path)
+            _own_sandbox_dirs.discard(self.path)
             self.logger.debug(f"Cleaned up sandbox directory: {self.path}")
         else:
             self.logger.warning(
@@ -170,7 +179,10 @@ class SandboxDirectory:
 
 
 async def destroy_sandbox_vms(sandbox_path: Path) -> None:
-    """Destroy any Vagrant VMs in a sandbox directory."""
+    """Destroy any Vagrant VMs in a sandbox directory.
+
+    Raises RuntimeError if `vagrant destroy` fails.
+    """
     logger = getLogger(__name__)
     vagrant_dir = sandbox_path / ".vagrant"
 
@@ -182,8 +194,9 @@ async def destroy_sandbox_vms(sandbox_path: Path) -> None:
     vagrant = Vagrant(root=str(sandbox_path))
     result = await vagrant._run_vagrant_command_async(["destroy", "-f"])
     if result["returncode"] != 0:
-        logger.warning(
-            f"vagrant destroy returned {result['returncode']}: {result['stderr']}"
+        raise RuntimeError(
+            f"vagrant destroy returned {result['returncode']}: "
+            f"{result['stderr'].strip()}"
         )
 
 
@@ -211,11 +224,18 @@ def cleanup_sandbox_directory(path: Path) -> None:
         raise ValueError(f"Refusing to delete directory outside cache: {path}")
 
     shutil.rmtree(path)
+    _own_sandbox_dirs.discard(path)
     logger.info(f"Cleaned up sandbox directory: {path}")
 
 
 async def cleanup_sandbox_with_vms(path: Path) -> None:
-    """Destroy VMs and remove a sandbox directory."""
+    """Destroy a sandbox's VMs, then remove its directory.
+
+    If `vagrant destroy` fails the directory is kept and RuntimeError raised:
+    `.vagrant` inside it is the only handle on the VM that is still running,
+    and without it neither `inspect sandbox cleanup vagrant` nor a manual
+    `vagrant destroy` can reach it.
+    """
     await destroy_sandbox_vms(path)
     await asyncio.to_thread(cleanup_sandbox_directory, path)
 
@@ -749,8 +769,18 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         config: SandboxEnvironmentConfigType | None,
         cleanup: bool,
     ) -> None:
-        cache_dir = get_sandbox_cache_dir()
-        directories = list_sandbox_directories()
+        # Only the sandboxes this process created: the cache directory is
+        # shared with any other process using the provider, whose sandboxes
+        # are live (removing one leaves its VM running, with nothing left on
+        # disk that can destroy it). Normally sample_cleanup() has already
+        # removed them all; what remains is from interrupted samples and
+        # failed destroys.
+        directories = []
+        for path in sorted(_own_sandbox_dirs):
+            if path.exists():
+                directories.append(path)
+            else:
+                _own_sandbox_dirs.discard(path)
 
         if not directories:
             return
@@ -761,8 +791,12 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
                 try:
                     await cleanup_sandbox_with_vms(path)
                 except Exception as e:
-                    cls.logger.error(f"Failed to clean up {path}: {e}")
+                    cls.logger.error(
+                        f"Failed to clean up {path}: {e}. Retry with: "
+                        "inspect sandbox cleanup vagrant"
+                    )
         else:
+            cache_dir = get_sandbox_cache_dir()
             cls.logger.info(f"Sandbox cache directory: {cache_dir}")
             for path in directories:
                 cls.logger.info(f"  {path.name}")

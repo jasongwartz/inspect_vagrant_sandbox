@@ -15,6 +15,7 @@ from inspect_ai.util import (
 )
 from inspect_ai.util._concurrency import init_concurrency
 
+import vagrantsandbox.vagrant_sandbox_provider as provider_module
 from vagrantsandbox.vagrant_sandbox_provider import (
     Vagrant,
     VagrantSandboxEnvironment,
@@ -25,6 +26,7 @@ from vagrantsandbox.vagrant_sandbox_provider import (
     _run_in_executor,
     _get_max_vagrant_startups,
     _startup_semaphore,
+    cleanup_sandbox_with_vms,
 )
 
 # exec() prints a marker to the guest's stderr before running the command.
@@ -2059,3 +2061,141 @@ class TestSampleIdHandling:
         sandbox_dir = await SandboxDirectory.create(sample_id="sample01")
 
         assert sandbox_dir.path.name.startswith("sample01-")
+
+
+class TestTaskCleanup:
+    """task_cleanup() runs at the end of a run, in a cache directory shared
+    with every other process using the provider (#76)."""
+
+    @pytest.fixture(autouse=True)
+    def own_cache_dir(self, tmp_path, monkeypatch):
+        """An empty cache directory, and no sandboxes created by this process."""
+        monkeypatch.setenv("INSPECT_SANDBOX_CACHE_DIR", str(tmp_path))
+        monkeypatch.setattr(provider_module, "_own_sandbox_dirs", set())
+        return tmp_path
+
+    @staticmethod
+    def other_process_sandbox(cache_dir: Path) -> Path:
+        """A live sandbox directory that another process created."""
+        path = cache_dir / "7cb1c256"
+        (path / ".vagrant").mkdir(parents=True)
+        return path
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_task_cleanup_leaves_other_processes_sandboxes(self, own_cache_dir):
+        """Only this process's sandboxes: another eval's are still in use."""
+        theirs = self.other_process_sandbox(own_cache_dir)
+        ours = await SandboxDirectory.create(sample_id="ours")
+
+        with patch(
+            "vagrantsandbox.vagrant_sandbox_provider.destroy_sandbox_vms",
+            new_callable=AsyncMock,
+        ) as mock_destroy:
+            await VagrantSandboxEnvironment.task_cleanup(
+                "test_task", None, cleanup=True
+            )
+
+        mock_destroy.assert_awaited_once_with(ours.path)
+        assert not ours.path.exists()
+        assert theirs.is_dir()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_task_cleanup_skips_sandboxes_sample_cleanup_removed(
+        self, own_cache_dir
+    ):
+        """sample_cleanup() has normally removed them all by then."""
+        ours = await SandboxDirectory.create(sample_id="ours")
+        await ours.cleanup()
+
+        with patch(
+            "vagrantsandbox.vagrant_sandbox_provider.destroy_sandbox_vms",
+            new_callable=AsyncMock,
+        ) as mock_destroy:
+            await VagrantSandboxEnvironment.task_cleanup(
+                "test_task", None, cleanup=True
+            )
+
+        mock_destroy.assert_not_awaited()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_task_cleanup_without_cleanup_keeps_sandboxes(
+        self, own_cache_dir, caplog
+    ):
+        """--no-sandbox-cleanup: list this process's sandboxes, remove nothing."""
+        caplog.set_level("INFO", logger="vagrantsandbox")
+        ours = await SandboxDirectory.create(sample_id="ours")
+
+        with patch(
+            "vagrantsandbox.vagrant_sandbox_provider.destroy_sandbox_vms",
+            new_callable=AsyncMock,
+        ) as mock_destroy:
+            await VagrantSandboxEnvironment.task_cleanup(
+                "test_task", None, cleanup=False
+            )
+
+        mock_destroy.assert_not_awaited()
+        assert ours.path.is_dir()
+        assert any(ours.path.name in message for message in caplog.messages)
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_cleanup_sandbox_with_vms_keeps_directory_when_destroy_fails(
+        self, own_cache_dir
+    ):
+        """The directory is the only handle on a VM that failed to be destroyed."""
+        path = self.other_process_sandbox(own_cache_dir)
+
+        with patch(
+            "vagrantsandbox.vagrant_sandbox_provider.Vagrant._run_vagrant_command_async",
+            new_callable=AsyncMock,
+            return_value={"returncode": 1, "stdout": "", "stderr": "destroy failed"},
+        ) as mock_vagrant:
+            with pytest.raises(RuntimeError, match="destroy failed"):
+                await cleanup_sandbox_with_vms(path)
+
+        mock_vagrant.assert_awaited_once_with(["destroy", "-f"])
+        assert (path / ".vagrant").is_dir()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_cleanup_sandbox_with_vms_removes_directory_after_destroy(
+        self, own_cache_dir
+    ):
+        path = self.other_process_sandbox(own_cache_dir)
+
+        with patch(
+            "vagrantsandbox.vagrant_sandbox_provider.Vagrant._run_vagrant_command_async",
+            new_callable=AsyncMock,
+            return_value={"returncode": 0, "stdout": "", "stderr": ""},
+        ):
+            await cleanup_sandbox_with_vms(path)
+
+        assert not path.exists()
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    async def test_task_cleanup_keeps_sandbox_when_destroy_fails(
+        self, own_cache_dir, caplog
+    ):
+        """A failed destroy is logged with how to retry, and the sandbox kept."""
+        caplog.set_level("ERROR", logger="vagrantsandbox")
+        ours = await SandboxDirectory.create(sample_id="ours")
+        (ours.path / ".vagrant").mkdir()
+
+        with patch(
+            "vagrantsandbox.vagrant_sandbox_provider.Vagrant._run_vagrant_command_async",
+            new_callable=AsyncMock,
+            return_value={"returncode": 1, "stdout": "", "stderr": "destroy failed"},
+        ):
+            await VagrantSandboxEnvironment.task_cleanup(
+                "test_task", None, cleanup=True
+            )
+
+        assert ours.path.is_dir()
+        assert any(
+            "destroy failed" in message and "inspect sandbox cleanup vagrant" in message
+            for message in caplog.messages
+        )
