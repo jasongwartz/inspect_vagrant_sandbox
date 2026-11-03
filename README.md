@@ -161,7 +161,7 @@ export INSPECT_MAX_VAGRANT_STARTUPS=4
 
 If `INSPECT_MAX_VAGRANT_STARTUPS` is not set, Inspect's sandbox concurrency (`--max-sandboxes`) controls the parallelism.
 
-Note that this only throttles the `vagrant up` operation. Once VMs are running, other operations (SSH commands, file transfers) can run in parallel following other Inspect concurrency settings.
+Note that this only throttles the `vagrant up` operation. Once VMs are running, other operations (SSH commands, file transfers) are not throttled: each is a local `vagrant ssh` process, so how many run at once scales with the number of running sandboxes (`--max-sandboxes`), not with `--max-subprocesses`.
 
 ### Testing your Vagrantfile and Sandbox
 
