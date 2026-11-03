@@ -181,7 +181,9 @@ You can attempt to clean up sandboxes with:
 inspect sandbox cleanup vagrant
 ```
 
-This will also print the "sandbox cache directory". The Vagrant Sandbox provider makes copies of an eval's `Vagrantfile`, to create an isolated "environment" for running sandboxes for multiple Inspect samples in parallel. At the end of a run, the provider only cleans up the sandboxes that run created, since other `inspect eval` processes on the same machine may still be using theirs; `inspect sandbox cleanup vagrant` cleans up everything in the cache directory, so only run it when no eval is running.
+This will also print the "sandbox cache directory". The Vagrant Sandbox provider makes copies of an eval's `Vagrantfile`, to create an isolated "environment" for running sandboxes for multiple Inspect samples in parallel.
+
+At the end of a run, the provider only cleans up the sandboxes that run created, since other `inspect eval` processes on the same machine may still be using theirs. Sandboxes left behind by a run that crashed are not removed by later runs. `inspect sandbox cleanup vagrant` cleans up everything in the cache directory, so only run it when no eval is running.
 
 You can review which Vagrant VMs are running with:
 

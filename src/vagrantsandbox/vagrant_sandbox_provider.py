@@ -157,8 +157,8 @@ class SandboxDirectory:
             subdir_name = short_uuid
 
         path = base_dir / subdir_name
-        await asyncio.to_thread(path.mkdir, exist_ok=True)
         _own_sandbox_dirs.add(path)
+        await asyncio.to_thread(path.mkdir, exist_ok=True)
 
         cls.logger.debug(f"Created sandbox directory: {path}")
         return cls(path)
@@ -181,7 +181,7 @@ class SandboxDirectory:
 async def destroy_sandbox_vms(sandbox_path: Path) -> None:
     """Destroy any Vagrant VMs in a sandbox directory.
 
-    Raises RuntimeError if `vagrant destroy` fails.
+    Raises RuntimeError if `vagrant destroy` fails while a VM exists.
     """
     logger = getLogger(__name__)
     vagrant_dir = sandbox_path / ".vagrant"
@@ -194,10 +194,17 @@ async def destroy_sandbox_vms(sandbox_path: Path) -> None:
     vagrant = Vagrant(root=str(sandbox_path))
     result = await vagrant._run_vagrant_command_async(["destroy", "-f"])
     if result["returncode"] != 0:
-        raise RuntimeError(
+        error = (
             f"vagrant destroy returned {result['returncode']}: "
             f"{result['stderr'].strip()}"
         )
+        # Vagrant writes `id` when it creates a machine. Without one there is
+        # no VM to lose: vagrant creates .vagrant before it reads the
+        # Vagrantfile, so a Vagrantfile that fails `vagrant up` fails destroy
+        # the same way.
+        if any((vagrant_dir / "machines").glob("*/*/id")):
+            raise RuntimeError(error)
+        logger.warning(f"{error}. No VM was created, so the directory can go.")
 
 
 def list_sandbox_directories() -> list[Path]:
@@ -224,7 +231,6 @@ def cleanup_sandbox_directory(path: Path) -> None:
         raise ValueError(f"Refusing to delete directory outside cache: {path}")
 
     shutil.rmtree(path)
-    _own_sandbox_dirs.discard(path)
     logger.info(f"Cleaned up sandbox directory: {path}")
 
 
@@ -238,6 +244,7 @@ async def cleanup_sandbox_with_vms(path: Path) -> None:
     """
     await destroy_sandbox_vms(path)
     await asyncio.to_thread(cleanup_sandbox_directory, path)
+    _own_sandbox_dirs.discard(path)
 
 
 class ExecCommandReturn(TypedDict):
@@ -773,8 +780,8 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         # shared with any other process using the provider, whose sandboxes
         # are live (removing one leaves its VM running, with nothing left on
         # disk that can destroy it). Normally sample_cleanup() has already
-        # removed them all; what remains is from interrupted samples and
-        # failed destroys.
+        # removed them all; what remains is from interrupted samples (which
+        # includes failed file copies and setup scripts) and failed destroys.
         directories = []
         for path in sorted(_own_sandbox_dirs):
             if path.exists():
