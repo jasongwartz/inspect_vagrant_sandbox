@@ -90,7 +90,7 @@ jobs:
             libvirt-daemon \
             libvirt-daemon-system \
             libvirt-dev \
-            qemu-kvm \
+            qemu-system-x86 \
             qemu-utils
 
       - name: Start libvirtd
