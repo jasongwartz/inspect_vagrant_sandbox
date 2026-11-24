@@ -39,7 +39,7 @@ def get_basic_vagrantfile() -> str:
 async def test_self_check() -> None:
     """Bring up a VM and run Inspect's core sandbox conformance suite against it."""
     checks = [getattr(self_check, name) for name in self_check.__all__]
-    # 44 checks as of inspect-ai 0.3.268: fail loudly rather than pass vacuously
+    # 47 checks as of inspect-ai 0.3.292: fail loudly rather than pass vacuously
     # if a change upstream stops `__all__` from listing them.
     assert len(checks) >= 40, f"only {len(checks)} self_check checks found"
 
