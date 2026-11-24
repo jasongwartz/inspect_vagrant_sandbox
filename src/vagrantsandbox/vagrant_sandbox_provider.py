@@ -964,16 +964,23 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             # command's own result. With a timeout, GNU timeout is what can't
             # execute cmd[0]: "/usr/bin/timeout: failed to run command
             # '/etc/passwd': Permission denied" (‘/etc/passwd’ in UTF-8 locales).
+            # uutils' timeout (Ubuntu's coreutils from 25.10) doesn't name the
+            # command: "timeout: failed to execute process: Permission denied
+            # (os error 13)".
             if (
                 exec_result.returncode == 126
                 and cmd
                 and exec_result.stderr.rstrip().endswith(
                     f": {cmd[0]}: Permission denied"
                     if timeout is None
-                    else tuple(
-                        f"{self.TIMEOUT_COMMAND}: failed to run command "
-                        f"{quoted}: Permission denied"
-                        for quoted in (f"'{cmd[0]}'", f"‘{cmd[0]}’")
+                    else (
+                        *(
+                            f"{self.TIMEOUT_COMMAND}: failed to run command "
+                            f"{quoted}: Permission denied"
+                            for quoted in (f"'{cmd[0]}'", f"‘{cmd[0]}’")
+                        ),
+                        "timeout: failed to execute process: "
+                        "Permission denied (os error 13)",
                     )
                 )
             ):

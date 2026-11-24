@@ -851,6 +851,35 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "stderr",
+        [
+            "/usr/bin/timeout: failed to run command '/etc/passwd': "
+            "Permission denied\n",
+            "/usr/bin/timeout: failed to run command ‘/etc/passwd’: "
+            "Permission denied\n",
+            # uutils (Ubuntu's coreutils from 25.10) doesn't name the command
+            "timeout: failed to execute process: Permission denied (os error 13)\n",
+        ],
+        ids=["gnu C locale", "gnu UTF-8 locale", "uutils"],
+    )
+    async def test_exec_permission_denied_under_timeout(
+        self, mock_vagrant, mock_sandbox_dir, stderr
+    ):
+        """With a timeout, `timeout` reports a non-executable cmd[0]."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
+        mock_vagrant.ssh.return_value = {
+            "returncode": 126,
+            "stdout": "",
+            "stderr": f"{VagrantSandboxEnvironment.STDERR_MARKER}\n{stderr}",
+        }
+
+        with pytest.raises(PermissionError) as exc_info:
+            await env.exec(["/etc/passwd"], timeout=30)
+        assert exc_info.value.filename == "/etc/passwd"
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_exec_permission_denied_only_for_the_command_itself(
         self, tmp_path, mock_sandbox_dir
     ):
