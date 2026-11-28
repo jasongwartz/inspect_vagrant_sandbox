@@ -2,8 +2,10 @@ import asyncio
 import base64
 import errno
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
@@ -1237,6 +1239,75 @@ class TestVagrantSandboxEnvironment:
 
     @pytest.mark.unit
     @pytest.mark.asyncio
+    async def test_file_ops_run_as_user(self, mock_vagrant, mock_sandbox_dir):
+        """With `user`, the whole file command runs as that user via sudo."""
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
+        mock_vagrant.ssh.return_value = {"returncode": 0, "stdout": "", "stderr": ""}
+
+        await env.write_file("/tmp/d/f.txt", "x", user="alice")
+        command = mock_vagrant.ssh.call_args[1]["command"]
+        assert command.startswith(EXEC_PREFIX + "sudo -H -n -u alice sh -c ")
+        assert "mkdir -p -- /tmp/d && base64 -d > /tmp/d/f.txt" in command
+
+        mock_vagrant.ssh.return_value["stdout"] = read_file_stdout(b"x")
+        assert await env.read_file("/tmp/d/f.txt", user="alice") == "x"
+        command = mock_vagrant.ssh.call_args[1]["command"]
+        assert command.startswith(EXEC_PREFIX + "sudo -H -n -u alice sh -c ")
+        assert "base64 -- /tmp/d/f.txt" in command
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(sys.platform != "linux", reason="read_file() runs GNU stat")
+    @pytest.mark.skipif(
+        subprocess.run(
+            ["sudo", "-n", "-u", "nobody", "true"], capture_output=True
+        ).returncode
+        != 0
+        if shutil.which("sudo")
+        else True,
+        reason="needs passwordless sudo to the nobody user",
+    )
+    async def test_file_ops_as_user_enforce_permissions(self, mock_sandbox_dir):
+        """read_file()/write_file() with `user` get that user's permissions,
+        against a stand-in for `vagrant ssh` that runs a real shell."""
+        vagrant = Vagrant(root=tempfile.gettempdir())
+        vagrant._make_vagrant_command = lambda args: ["bash", "-c", args[-1]]
+        env = VagrantSandboxEnvironment(mock_sandbox_dir, vagrant, "default")
+        # Not tmp_path: pytest makes its parents 0700, so `nobody` can't reach it
+        directory = Path(tempfile.mkdtemp())
+        try:
+            directory.chmod(0o755)
+            private = directory / "private"
+            private.write_text("private")
+            private.chmod(0o600)
+            link = directory / "link"
+            link.symlink_to(private)
+
+            for path in (private, link):
+                assert await env.read_file(str(path)) == "private"
+                with pytest.raises(PermissionError):
+                    await env.read_file(str(path), user="nobody")
+                with pytest.raises(PermissionError):
+                    await env.write_file(str(path), "changed", user="nobody")
+            assert private.read_text() == "private"
+
+            private.chmod(0o644)
+            assert await env.read_file(str(link), user="nobody") == "private"
+
+            writable = directory / "writable"
+            writable.mkdir()
+            writable.chmod(0o777)
+            await env.write_file(str(writable / "sub" / "new"), b"new", user="nobody")
+            assert (writable / "sub" / "new").read_bytes() == b"new"
+            assert (writable / "sub" / "new").owner() == "nobody"
+            assert (writable / "sub").owner() == "nobody"
+        finally:
+            # Files `nobody` created may not be removable by a non-root runner
+            subprocess.run(["sudo", "-n", "rm", "-rf", str(directory)], check=False)
+            shutil.rmtree(directory, ignore_errors=True)
+
+    @pytest.mark.unit
+    @pytest.mark.asyncio
     async def test_read_file_limit(self, mock_vagrant, mock_sandbox_dir):
         """Test that reading an oversized file raises OutputLimitExceededError."""
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
@@ -1686,9 +1757,10 @@ class TestTimeoutHandling:
     @pytest.mark.parametrize(
         "returncode,elapsed,timed_out",
         [
-            (124, 0, True),  # GNU timeout: the command was stopped by SIGTERM
+            (124, 30, True),  # GNU timeout: the command was stopped by SIGTERM
             (137, 30, True),  # GNU timeout: the command ignored SIGTERM
             (143, 30, True),  # BusyBox timeout
+            (124, 0, False),  # `exit 124`, or the command's own `timeout`
             (137, 0, False),  # e.g. the OOM killer
             (143, 0, False),  # e.g. `kill $$`
             (1, 30, False),
@@ -1699,7 +1771,7 @@ class TestTimeoutHandling:
     ):
         """The guest's `timeout` exit codes raise TimeoutError.
 
-        A signal death well before the timeout is the command's own result.
+        The same exit code well before the timeout is the command's own result.
         """
         env = VagrantSandboxEnvironment(mock_sandbox_dir, mock_vagrant, "default")
         mock_vagrant.ssh.return_value = {

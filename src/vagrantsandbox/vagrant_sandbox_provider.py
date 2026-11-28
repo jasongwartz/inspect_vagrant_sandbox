@@ -947,12 +947,16 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             )
             # The guest's timeout fired: GNU timeout exits 124 when SIGTERM
             # stopped the command and 137 when it had to SIGKILL it, BusyBox's
-            # exits 143. A command killed by those signals for another reason
-            # (e.g. the OOM killer, or `kill $$`) exits 137 or 143 too, so those
-            # only count once the timeout has passed.
-            if timeout is not None and exec_result.returncode in (124, 137, 143):
-                if exec_result.returncode == 124 or elapsed >= timeout:
-                    raise TimeoutError(f"Command timed out after {timeout} seconds")
+            # exits 143. A command can also exit with these itself (`exit 124`,
+            # its own `timeout`, the OOM killer, `kill $$`), so they only count
+            # once the timeout has passed. `elapsed` includes vagrant's startup,
+            # so a real timeout always passes this check.
+            if (
+                timeout is not None
+                and exec_result.returncode in (124, 137, 143)
+                and elapsed >= timeout
+            ):
+                raise TimeoutError(f"Command timed out after {timeout} seconds")
             # Raise only if the shell could not execute cmd[0] itself (bash:
             # "bash: line 1: /etc/passwd: Permission denied", dash under
             # `user`: "sh: 1: /etc/passwd: Permission denied"). The same error
@@ -1051,7 +1055,9 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         raise subprocess.CalledProcessError(returncode, command, stdout, stderr)
 
     @override
-    async def write_file(self, file: str, contents: str | bytes) -> None:
+    async def write_file(
+        self, file: str, contents: str | bytes, *, user: str | None = None
+    ) -> None:
         contents_bytes: bytes
         if isinstance(contents, bytes):
             contents_bytes = contents
@@ -1070,7 +1076,9 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
         command = f"export LC_ALL=C; {mkdir_prefix}base64 -d > {shlex.quote(file)}"
         result = await self.vagrant.ssh(
             vm_name=self.vm_name,
-            command=f"echo {self.STDERR_MARKER} >&2; {command}",
+            # As `user`, the guest enforces that user's permissions, and the
+            # file and any parent directories created are owned by them.
+            command=f"echo {self.STDERR_MARKER} >&2; {self._as_user(command, user)}",
             input=encoded,
         )
         if result["returncode"] != 0:
@@ -1085,13 +1093,19 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             )
 
     @overload
-    async def read_file(self, file: str, text: Literal[True] = True) -> str: ...
+    async def read_file(
+        self, file: str, text: Literal[True] = True, *, user: str | None = None
+    ) -> str: ...
 
     @overload
-    async def read_file(self, file: str, text: Literal[False]) -> bytes: ...
+    async def read_file(
+        self, file: str, text: Literal[False], *, user: str | None = None
+    ) -> bytes: ...
 
     @override
-    async def read_file(self, file: str, text: bool = True) -> str | bytes:
+    async def read_file(
+        self, file: str, text: bool = True, *, user: str | None = None
+    ) -> str | bytes:
         quoted_file = shlex.quote(file)
         # Check the file's size against Inspect's read limit before transferring
         # it, then transfer base64-encoded so binary content survives the ssh
@@ -1110,7 +1124,8 @@ class VagrantSandboxEnvironment(SandboxEnvironment):
             f"echo {self.READ_FILE_END_MARKER}"
         )
         result = await self.vagrant.ssh(
-            vm_name=self.vm_name, command=f"echo {self.STDERR_MARKER} >&2; {command}"
+            vm_name=self.vm_name,
+            command=f"echo {self.STDERR_MARKER} >&2; {self._as_user(command, user)}",
         )
         if result["returncode"] != 0:
             if limit_marker in result["stderr"]:
